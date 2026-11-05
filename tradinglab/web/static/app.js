@@ -6,7 +6,8 @@
   const LW = window.LightweightCharts;
   const TFS = ["1h", "4h", "1d"];
   const TITLES = { "1h": "TRADER 1H", "4h": "TRADER 4H", "1d": "TRADER 1D" };
-  const TABS = [["overview", "Обзор"], ["ind", "Индикаторы"], ["struct", "Структура"], ["onchain", "Ончейн"], ["dec", "Решения"], ["diag", "Диагностика"]];
+  const TABS = [["overview", "Обзор"], ["ind", "Индикаторы"], ["struct", "Структура"], ["onchain", "Ончейн"], ["dec", "Решения"], ["audit", "Аудит индикаторов"], ["diag", "Диагностика"]];
+  const MOBILE = () => window.matchMedia("(max-width: 640px), (hover: none)").matches;
   const OSC = ["rsi", "macd", "mfi", "cmf", "obv"];          // панели осцилляторов сверху вниз (значения — из ядра)
   const DIV_PANE = { RSI: "rsi", MACD_HIST: "macd", MFI: "mfi", CMF: "cmf", OBV: "obv" };
   const OSC_LABEL = { rsi: "RSI(14) · 30 / 50 / 70", macd: "MACD(12,26,9) · гистограмма = MACD − Signal", mfi: "MFI(14) · 20 / 80",
@@ -35,6 +36,7 @@
             <span class="spacer"></span><span class="muted">UTC · панели: RSI · MACD · MFI · CMF · OBV</span>
           </div>
           <div class="chart" data-f="chart"><div class="legend" data-f="legend"></div><div class="tip" data-f="tip"></div></div>
+          <div class="barinfo" data-f="barinfo"></div>
         </div>
         <div class="side">
           <div class="panel-h"><span>Позиция</span><span data-f="posbadge"></span></div>
@@ -55,6 +57,7 @@
         ${TABS.map(([k], i) => `<div class="tab-body ${i === 0 ? "on" : ""}" data-body="${k}"></div>`).join("")}
       </div>`;
     sec.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+      if (b.dataset.tab === "audit") renderAudit(tf);
       sec.querySelectorAll("[data-tab]").forEach((x) => x.classList.toggle("on", x === b));
       sec.querySelectorAll("[data-body]").forEach((x) => x.classList.toggle("on", x.dataset.body === b.dataset.tab));
     }));
@@ -182,11 +185,11 @@
     // живых свечей может ещё не быть (бот загружает историю) — отсутствующие ряды отображаются пустыми
     const S = new Proxy(d.series || {}, { get: (o, k) => o[k] || [] });
     const cs = d.candles.map((k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close }));
-    const fm = d.forming;
-    if (fm && (!cs.length || fm.ts > cs.at(-1).time)) // формирующаяся свеча: только отображение, в сигналах не участвует
-      cs.push({ time: fm.ts, open: fm.o, high: fm.h, low: fm.l, close: fm.c, color: "rgba(166,174,185,.45)", wickColor: "rgba(166,174,185,.6)", borderColor: "rgba(166,174,185,.6)" });
+    const vs = d.candles.map((k) => ({ time: k.time, value: k.volume, color: k.close >= k.open ? "rgba(25,158,112,.35)" : "rgba(230,103,103,.35)" }));
+    // формирующаяся свеча (и предварительно закрытая, пока GT её не отдал): только отображение, в сигналах не участвует
+    liveBars(d).forEach((b) => { cs.push(styledBar(b)); if (b.volume != null) vs.push({ time: b.time, value: b.volume, color: "rgba(166,174,185,.25)" }); });
     s.candle.setData(cs);
-    s.vol.setData(d.candles.map((k) => ({ time: k.time, value: k.volume, color: k.close >= k.open ? "rgba(25,158,112,.35)" : "rgba(230,103,103,.35)" })));
+    s.vol.setData(vs);
     s.emaF.setData(S.ema_fast); s.emaS.setData(S.ema_slow);
     s.bbU.setData(S.bb_upper); s.bbM.setData(S.bb_mid); s.bbL.setData(S.bb_lower);
     s.hist.setData(S.macd_hist.map((p) => ({ ...p, color: p.value >= 0 ? "rgba(25,158,112,.75)" : "rgba(230,103,103,.75)" })));
@@ -205,6 +208,46 @@
     const from = start ? d.candles.findIndex((k) => k.time >= start) : 0;
     if (from > 0) T[tf].chart.timeScale().setVisibleLogicalRange({ from, to: d.candles.length + 3 });
     else T[tf].chart.timeScale().fitContent();
+  }
+
+  function liveBars(d) {
+    const last = d.candles.at(-1)?.time ?? -1;
+    return d.mode === "FORWARD" ? (d.live?.bars || []).filter((b) => b.time > last) : [];
+  }
+
+  function styledBar(b) {
+    const up = b.close >= b.open;
+    const a = b.status === "FORMING" ? 0.35 : 0.55;              // формирующаяся — полупрозрачная, отдельного цвета
+    const col = up ? `rgba(25,158,112,${a})` : `rgba(230,103,103,${a})`;
+    return { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close, color: col, wickColor: col, borderColor: up ? css("--up") : css("--down") };
+  }
+
+  function buildMarkers(tf) {
+    const t = T[tf], d = t.data, tr = d.trader, st = tr?.analysis?.structure || d.preview?.structure || {};
+    const on = (k) => document.querySelector(`#t-${tf} [data-ov="${k}"]`).checked;
+    const marks = [];
+    if (on("trades")) (tr?.ops || []).forEach((o) => marks.push(o.side === "BUY"
+      ? { time: o.ts, position: "belowBar", color: css("--up"), shape: "arrowUp", text: "BUY" }
+      : { time: o.ts, position: "aboveBar", color: css("--down"), shape: "arrowDown", text: o.reason.startsWith("цель") ? "T1" : o.reason.startsWith("стоп") ? "STOP" : "SELL" }));
+    if (on("struct")) (st.events || []).slice(-12).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
+      color: css("--s-violet"), shape: "circle", size: 0.6, text: e.type.replace("_UP", "↑").replace("_DOWN", "↓") }));
+    liveBars(d).forEach((b) => marks.push({ time: b.time, position: "aboveBar", color: css("--text-secondary"), shape: "square", size: 0.5,
+      text: b.status === "FORMING" ? "FORMING" : "закрыта · ждёт GT" }));
+    marks.sort((a, b) => a.time - b.time);
+    return marks;
+  }
+
+  async function updateLive(tf) {
+    const t = T[tf];
+    if (!t.data || t.data.mode !== "FORWARD" || !t.data.candles.length) return;
+    const lv = await api(`/api/live/${tf}`);
+    const prev = Math.max(-1, ...(t.data.live?.bars || []).map((b) => b.time));
+    const now = Math.max(-1, ...lv.bars.map((b) => b.time));
+    t.data.live = lv;
+    if (now > prev && prev > 0) { await loadTerminal(tf); return; }  // период закрылся: полная перезагрузка (закрытая свеча из БД)
+    liveBars(t.data).forEach((b) => { t.s.candle.update(styledBar(b)); if (b.volume != null) t.s.vol.update({ time: b.time, value: b.volume, color: "rgba(166,174,185,.25)" }); });
+    t.markers.setMarkers(buildMarkers(tf));
+    if (!t.hovering) onCrosshair(tf, null);
   }
 
   function applyOverlays(tf) {
@@ -227,7 +270,6 @@
       ["0.382", "0.5", "0.618"].forEach((r) => pl(st.fib.retracement[r], css("--s4"), `Fib ${r}`, LW.LineStyle.Dotted));
       pl(st.fib.extension["1.618"], css("--s4"), "Ext 1.618", LW.LineStyle.Dotted);
     }
-    if (d.mode === "FORWARD" && d.quote) pl(d.quote.mid, css("--accent"), "Live", LW.LineStyle.Solid);
     const pos = tr?.position;
     if (pos) {
       pl(pos.entry_mid, css("--text-primary"), "Вход", LW.LineStyle.Solid);
@@ -247,14 +289,7 @@
       const pk = t.panes[DIV_PANE[dv.indicator]];
       if (pk != null) mk(pk, dv.p1.ind, dv.p2.ind);
     });
-    const marks = [];
-    if (on("trades")) (tr?.ops || []).forEach((o) => marks.push(o.side === "BUY"
-      ? { time: o.ts, position: "belowBar", color: css("--up"), shape: "arrowUp", text: "BUY" }
-      : { time: o.ts, position: "aboveBar", color: css("--down"), shape: "arrowDown", text: o.reason.startsWith("цель") ? "T1" : o.reason.startsWith("стоп") ? "STOP" : "SELL" }));
-    if (on("struct")) (st.events || []).slice(-12).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
-      color: css("--s-violet"), shape: "circle", size: 0.6, text: e.type.replace("_UP", "↑").replace("_DOWN", "↓") }));
-    marks.sort((a, b) => a.time - b.time);
-    t.markers.setMarkers(marks);
+    t.markers.setMarkers(buildMarkers(tf));
   }
 
   const num6 = (x) => (x == null ? "—" : (x >= 0 ? "+" : "−") + Math.abs(x).toFixed(6));
@@ -264,36 +299,86 @@
     return `<span style="color:var(--accent)">RSI ${fmt.num(r, 1)}</span>${z}`;
   }
 
-  function onCrosshair(tf, p) {
-    const t = T[tf], leg = $(tf, "legend"), tip = $(tf, "tip");
-    const tm = p?.time;
-    const k = tm != null ? t.byTime?.get(tm) : null;
-    const last = t.data?.candles?.[t.data.candles.length - 1];
-    const c = k || last;
-    if (c) {
-      const g = (n) => t.ind?.[n]?.get(c.time);
-      leg.innerHTML = `${fmt.time(c.time)}  O ${fmt.price(c.open)}  H ${fmt.price(c.high)}  L ${fmt.price(c.low)}  C <span class="${c.close >= c.open ? "pos" : "neg"}">${fmt.price(c.close)}</span>
-        V ${fmt.big(c.volume)}  ·  <span style="color:var(--s1)">EMA ${fmt.price(g("ema_fast"))}</span> <span style="color:var(--s2)">${fmt.price(g("ema_slow"))}</span>
-        <br>${rsiTxt(g("rsi"))} · MACD ${num6(g("macd"))} · Signal ${num6(g("macd_signal"))} · Hist ${num6(g("macd_hist"))}
-        · MFI ${fmt.num(g("mfi"), 1)} · CMF ${fmt.num(g("cmf"), 3)} · OBV ${fmt.num(g("obv"), 0)}`;
-      placeLabels(tf);
+  // ------------------------------------------------------------------ подсказки при наведении
+  const PANE_KEY = (t, i) => (i === 0 ? "price" : Object.keys(t.panes).find((k) => t.panes[k] === i));
+
+  function barValues(tf, time) {
+    const t = T[tf], d = t.data;
+    const lb = liveBars(d).find((b) => b.time === time);
+    if (lb) {
+      const lv = d.live?.values?.live, cl = d.live?.values?.closed;
+      const isLast = lv && lv.time === time;
+      return { bar: lb, status: lb.status, v: (n) => (isLast ? lv[n] : null), closed: (n) => cl?.[n], closedTime: cl?.time };
     }
-    const ops = tm != null ? (t.data?.trader?.ops || []).filter((o) => o.ts === tm) : [];
-    if (!ops.length || !p.point) { tip.style.display = "none"; return; }
-    tip.innerHTML = ops.map((o) => `<div class="t"><span class="side-b ${o.side === "BUY" ? "buy" : "sell"}">${o.side}</span> · ${fmt.dt(o.ts)}</div>
-      <table>
+    const k = t.byTime?.get(time);
+    return k ? { bar: k, status: "CLOSED", v: (n) => t.ind?.[n]?.get(time), closed: null } : null;
+  }
+
+  function tipHtml(tf, time, pane) {
+    const x = barValues(tf, time);
+    if (!x) return "";
+    const { bar, status, v } = x;
+    const live = status !== "CLOSED";
+    const val = (n, f) => {
+      const a = v(n), cv = live && x.closed ? x.closed(n) : null;
+      return `${f(a)}${live && cv != null ? ` <span class="muted">(закрытая ${f(cv)})</span>` : ""}`;
+    };
+    const p5 = (z) => fmt.price(z), n1 = (z) => fmt.num(z, 1), n3 = (z) => fmt.num(z, 3), n0 = (z) => fmt.num(z, 0);
+    const sec = (key, title, rows) => `<div class="tsec ${pane === key ? "on" : ""}"><div class="th">${title}</div><table>${rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join("")}</table></div>`;
+    const tag = { CLOSED: "закрытая свеча", FORMING: "FORMING — формирующаяся, меняется с ценой", CLOSING: "закрыта, ждёт свечу GeckoTerminal (предварительно)" }[status];
+    const r = v("rsi");
+    let h = `<div class="t">${fmt.dt(time)} · <span class="${live ? "warnline" : "muted"}">${tag}</span></div>`;
+    h += sec("price", "Цена", [["O / H", `${p5(bar.open)} / ${p5(bar.high)}`], ["L / C", `${p5(bar.low)} / <b>${p5(bar.close)}</b>`],
+      ["Объём", bar.volume == null ? "—" : fmt.big(bar.volume) + (live ? " (частичный)" : "")],
+      ["EMA20 / EMA50", `${val("ema_fast", p5)} / ${val("ema_slow", p5)}`],
+      ["BB верх / ср / низ", `${val("bb_upper", p5)} / ${val("bb_mid", p5)} / ${val("bb_lower", p5)}`]]);
+    if (T[tf].panes.rsi) h += sec("rsi", "RSI(14)", [["RSI", val("rsi", n1) + (r == null ? "" : r >= 70 ? ' <span class="neg">перекупленность</span>' : r <= 30 ? ' <span class="pos">перепроданность</span>' : "")]]);
+    h += sec("macd", "MACD(12,26,9)", [["MACD", val("macd", num6)], ["Signal", val("macd_signal", num6)], ["Histogram", val("macd_hist", num6) + ' <span class="muted">= MACD − Signal</span>']]);
+    h += sec("mfi", "MFI(14)", [["MFI", val("mfi", n1)]]) + sec("cmf", "CMF(20)", [["CMF", val("cmf", n3)]]) + sec("obv", "OBV", [["OBV", val("obv", n0)]]);
+    if (live && r == null && v("macd_hist") == null) h += `<div class="muted">Значения индикаторов этой свечи появятся после получения закрытой свечи GeckoTerminal.</div>`;
+    else if (live) h += `<div class="muted">${status === "CLOSING" ? "Предварительные значения по котировкам — окончательные после свечи GeckoTerminal" :
+      "LIVE-значения — по формирующейся свече"}; стратегиями не используются. В скобках — по последней закрытой свече.</div>`;
+    const ops = (T[tf].data?.trader?.ops || []).filter((o) => o.ts === time);
+    h += ops.map((o) => `<div class="tsec"><div class="th"><span class="side-b ${o.side === "BUY" ? "buy" : "sell"}">${o.side}</span> · ${fmt.dt(o.ts)}</div><table>
         <tr><td>Цена исп.</td><td>${fmt.price(Number(o.price))} (mid ${fmt.price(Number(o.mid))})</td></tr>
-        <tr><td>Количество</td><td>${fmt.qty(Number(o.qty))} FABLES</td></tr>
-        <tr><td>Сумма</td><td>${fmt.usd(Number(o.usd))}</td></tr>
+        <tr><td>Количество</td><td>${fmt.qty(Number(o.qty))} FABLES · ${fmt.usd(Number(o.usd))}</td></tr>
         <tr><td>Издержки</td><td>fee ${fmt.usd(Number(o.fee_usd), 3)} · impact ${fmt.usd(Number(o.impact_usd), 3)} · slip ${fmt.usd(Number(o.slippage_usd), 3)} · gas ${fmt.usd(Number(o.gas_usd), 3)}</td></tr>
         ${o.realized_pnl != null ? `<tr><td>PnL</td><td class="${fmt.cls(Number(o.realized_pnl))}">${fmt.sUsd(Number(o.realized_pnl))}</td></tr>` : ""}
-        <tr><td>Причина</td><td>${esc(o.reason)}</td></tr>
-        <tr><td>Позиция</td><td>${esc(o.position_id)}</td></tr>
-      </table>`).join("<hr style='border-color:var(--border)'>");
-    const box = $(tf, "chart").getBoundingClientRect();
+        <tr><td>Причина</td><td>${esc(o.reason)}</td></tr></table></div>`).join("");
+    return h;
+  }
+
+  function onCrosshair(tf, p) {
+    const t = T[tf], leg = $(tf, "legend"), tip = $(tf, "tip"), info = $(tf, "barinfo");
+    const d = t.data;
+    if (!d) return;
+    const tm = p?.time;
+    t.hovering = tm != null;
+    const lb = liveBars(d);
+    const lastTime = lb.length ? lb.at(-1).time : d.candles.at(-1)?.time;
+    const time = tm != null ? tm : lastTime;
+    const x = time != null ? barValues(tf, time) : null;
+    if (x) {
+      const c = x.bar;
+      leg.innerHTML = `${fmt.time(time)} ${x.status !== "CLOSED" ? '<span class="warnline">' + x.status + "</span> " : ""}O ${fmt.price(c.open)}  H ${fmt.price(c.high)}  L ${fmt.price(c.low)}  C <span class="${c.close >= c.open ? "pos" : "neg"}">${fmt.price(c.close)}</span>
+        V ${c.volume == null ? "—" : fmt.big(c.volume)} · ${rsiTxt(x.v("rsi"))} · Hist ${num6(x.v("macd_hist"))}`;
+      placeLabels(tf);
+    }
+    const html = time != null ? tipHtml(tf, time, p && p.paneIndex != null ? PANE_KEY(t, p.paneIndex) : null) : "";
+    if (MOBILE()) {                                   // мобильный: фиксированный блок значений выбранного бара
+      tip.style.display = "none";
+      info.style.display = html ? "block" : "none";
+      info.innerHTML = html ? `<div class="muted" style="margin-bottom:4px">${tm != null ? "Выбранный бар" : "Последний бар — коснитесь графика, чтобы выбрать другой"}</div>${html}` : "";
+      return;
+    }
+    info.style.display = "none";
+    if (tm == null || !p.point || !html) { tip.style.display = "none"; return; }
+    tip.innerHTML = html;
     tip.style.display = "block";
-    tip.style.left = Math.min(p.point.x + 16, box.width - 350) + "px";
-    tip.style.top = Math.max(p.point.y - 20, 30) + "px";
+    const box = $(tf, "chart").getBoundingClientRect();
+    const w = tip.offsetWidth, hgt = tip.offsetHeight;
+    tip.style.left = (p.point.x + 18 + w > box.width ? Math.max(4, p.point.x - w - 18) : p.point.x + 18) + "px";
+    tip.style.top = Math.max(4, Math.min(p.point.y - 20, box.height - hgt - 4)) + "px";
   }
 
   // ------------------------------------------------------------------ метрики, позиция, журнал
@@ -434,9 +519,47 @@
   }
 
   function indTable(an) {
-    return `<table class="t"><tr><th>Индикатор</th><th>Значение</th><th>Мин. баров</th><th>Статус</th><th>Интерпретация</th></tr>
-      ${an.indicators.map((r) => `<tr><td>${esc(r.name)}</td><td class="n">${esc(r.display)}</td><td class="n">${r.min_bars ?? "—"}</td>
-        <td><span class="badge ${r.status === "OK" ? "good" : "warn"}">${esc(r.status)}</span></td><td class="sec">${esc(r.text)}</td></tr>`).join("")}</table>`;
+    const live = an.indicators.some((r) => r.live !== undefined);
+    return `<table class="t"><tr><th>Индикатор</th><th>Закрытая свеча</th>${live ? "<th>LIVE (формирующаяся)</th>" : ""}<th>Мин. баров</th><th>Статус</th><th>Интерпретация</th></tr>
+      ${an.indicators.map((r) => `<tr><td>${esc(r.name)}</td><td class="n">${esc(r.display)}</td>${live ? `<td class="n warnline">${r.live == null ? "—" : esc(r.live_display)}</td>` : ""}
+        <td class="n">${r.min_bars ?? "—"}</td>
+        <td><span class="badge ${r.status === "OK" ? "good" : "warn"}">${esc(r.status)}</span></td><td class="sec">${esc(r.text)}</td></tr>`).join("")}</table>
+      <div class="muted" style="margin-top:6px">Закрытая свеча — значения, по которым решают стратегии (те же ряды, что на графике и в API).
+      ${live ? "LIVE — по формирующейся свече (open периода, high/low с начала периода, close — текущая котировка); меняется с ценой, стратегиями не используется." : ""}</div>`;
+  }
+
+  async function renderAudit(tf) {
+    const sec = document.querySelector(`#t-${tf}`), body = sec.querySelector('[data-body="audit"]');
+    body.innerHTML = `<div class="muted">Загрузка аудита…</div>`;
+    let r;
+    try { r = await api(`/api/audit/${tf}?mode=${mode}`); } catch (e) { body.innerHTML = `<div class="neg">${esc(e.message)}</div>`; return; }
+    if (r.error) { body.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
+    const N = { rsi: "RSI(14)", macd: "MACD", macd_signal: "MACD Signal", macd_hist: "MACD Histogram", mfi: "MFI(14)", cmf: "CMF(20)", obv: "OBV",
+      ema_fast: "EMA быстрая", ema_slow: "EMA медленная", bb_upper: "BB верхняя", bb_mid: "BB средняя", bb_lower: "BB нижняя", atr: "ATR(14)",
+      adx: "ADX", pdi: "+DI", ndi: "−DI" };
+    const st = { OK: "good", METHOD: "warn", WARMUP: "", "BUG?": "crit" };
+    const sel = T[tf].auditKey || "rsi";
+    const sum = Object.entries(r.summary).map(([k, v]) => `<tr class="click" data-k="${k}"><td>${N[k]}</td><td><span class="badge ${st[v.status]}">${v.status}</span></td>
+      <td class="n">${v.max_abs_diff.toExponential(2)}</td><td class="n">${(v.max_rel_diff * 100).toFixed(4)}%</td></tr>`).join("");
+    const g = (x, k) => x == null ? "—" : ["obv"].includes(k) ? fmt.num(x, 0) : Math.abs(x) < 0.01 ? x.toPrecision(6) : fmt.num(x, 4);
+    const rows = r.tables[sel].map((x) => `<tr><td>${x.ts ? fmt.dt(x.ts) : ""}</td><td class="n">${x.close == null ? "LIVE" : fmt.price(x.close)}</td>
+      <td class="n">${g(x.ours, sel)}</td><td class="n">${g(x.reference, sel)}</td><td class="n">${x.diff == null ? "—" : x.diff.toExponential(2)}</td>
+      ${sel === "rsi" ? `<td class="n">${g(x.rsi_sma, sel)}</td><td class="n">${g(x.rsi_ema, sel)}</td>` : ""}<td class="sec">${esc(x.note)}</td></tr>`).join("");
+    body.innerHTML = `<div class="grid2"><div class="box">
+        <h4>Сводка: ядро vs эталон (семантика TradingView / Pine — как на графике DexScreener)</h4>
+        <table class="t"><tr><th>Индикатор</th><th>Статус</th><th>max |diff|</th><th>max отн.</th></tr>${sum}</table>
+        <div class="muted" style="margin-top:6px">OK — совпадает; METHOD — различие методик (засев EMA/ATR), не ошибка; WARMUP — ядро ещё не показывает индикатор;
+        BUG? — необъяснённое расхождение. Источник: ${esc(r.source)}. ${esc(r.timestamp_convention)}. ${esc(r.value_convention)}.</div></div>
+      <div class="box"><h4>Почему RSI DexScreener может отличаться от нашего</h4><ul class="plain">
+        <li>Формула та же: RSI Уайлдера (RMA) — как стандартный RSI TradingView. «SMA 14» в легенде DexScreener — параметры <i>скользящей средней от RSI</i>, а не сглаживания RSI.
+          SMA-вариант RSI (Cutler) дал бы совсем другие значения — см. колонку «RSI SMA».</li>
+        <li>Наш график, легенда, таблица и API показывают RSI <b>закрытой</b> свечи. DexScreener показывает RSI <b>формирующейся</b> свечи — он меняется с ценой; сравнивайте со строкой LIVE.</li>
+        <li>Свечи DexScreener строятся из его собственного индекса сделок; у нас — свечи GeckoTerminal. Небольшая разница цен закрытия даёт разницу RSI.</li>
+        <li>DexScreener подписывает свечи временем начала в часовом поясе браузера; у нас — UTC.</li></ul></div></div>
+      <h4 style="margin-top:10px">${N[sel]}: последние 20 закрытых баров (+ LIVE)</h4>
+      <table class="t"><tr><th>timestamp (UTC, начало)</th><th>close</th><th>ours (ядро)</th><th>reference (Pine)</th><th>diff</th>
+        ${sel === "rsi" ? "<th>RSI SMA (Cutler)</th><th>RSI EMA</th>" : ""}<th>note</th></tr>${rows}</table>`;
+    body.querySelectorAll("tr[data-k]").forEach((tr) => tr.addEventListener("click", () => { T[tf].auditKey = tr.dataset.k; renderAudit(tf); }));
   }
 
   function condTable(list, title) {
@@ -669,6 +792,7 @@
     document.addEventListener("lab:refresh", () => refresh(true));
     // FORWARD: живое обновление (локальный сервер; внешние источники опрашивает только бот по своему расписанию)
     setInterval(() => refresh(mode === "FORWARD").catch(() => {}), 15000);
+    setInterval(() => { if (mode === "FORWARD") TFS.forEach((tf) => updateLive(tf).catch(() => {})); }, 5000);   // формирующаяся свеча
     setInterval(() => TFS.forEach((tf) => { if (T[tf].data?.mode === "FORWARD") $(tf, "asof").innerHTML = T[tf].data.trader
       ? monitorInfo(tf) + " · " + closeInfo(tf) + " · " + esc(T[tf].data.trader.summary.mark ? `оценка по ${fmt.price(T[tf].data.trader.summary.mark.mid)} @ ${fmt.time(T[tf].data.trader.summary.mark.ts)}` : "")
       : closeInfo(tf); }), 1000);

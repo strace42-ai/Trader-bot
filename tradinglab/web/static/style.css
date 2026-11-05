@@ -104,7 +104,15 @@ main { padding: 12px 16px 40px; display: flex; flex-direction: column; gap: 16px
               background: rgba(14, 17, 22, .7); padding: 0 4px; border-radius: 2px; white-space: nowrap; }
 .tip { position: absolute; z-index: 5; pointer-events: none; display: none; max-width: 340px; background: var(--surface-3);
        border: 1px solid var(--border-strong); border-radius: 4px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.5); }
-.tip .t { font-weight: 600; margin-bottom: 4px; }
+.tip .t, .barinfo .t { font-weight: 600; margin-bottom: 4px; }
+.tip { max-width: 380px; min-width: 260px; }
+.tsec { border-top: 1px solid var(--border); padding: 3px 0; }
+.tsec .th { color: var(--text-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
+.tsec.on { background: rgba(57, 135, 229, .10); }
+.tsec.on .th { color: var(--accent); }
+.barinfo { display: none; padding: 8px 10px; border-top: 1px solid var(--border); font-size: 12px; }
+.barinfo table, .tip table { border-collapse: collapse; font-family: var(--mono); font-size: 11px; width: 100%; }
+.barinfo td, .tip td { padding: 1px 8px 1px 0; vertical-align: top; }
 .tip table { border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
 .tip td { padding: 1px 8px 1px 0; vertical-align: top; }
 .overlay-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; z-index: 4; }

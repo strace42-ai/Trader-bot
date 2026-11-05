@@ -5,6 +5,7 @@
   python -m tradinglab web   [--port 8770] [--data data]                  только интерфейс (бот запущен отдельно)
   python -m tradinglab check [--data DIR]                                 разовая проверка источников живых данных
   python -m tradinglab doctor [--data data] [--port 8770]                 полная диагностика + файл отчёта для поддержки
+  python -m tradinglab audit [--tf 1h] [--md FILE]                        аудит индикаторов: ядро vs эталон Pine/TradingView (живые данные)
   python -m tradinglab backtest --fixtures datasets/fables_2026-11-05 [--now 2026-11-05T13:27:00Z] [--db PATH] [--json OUT]
 """
 from __future__ import annotations
@@ -52,7 +53,14 @@ def main() -> None:
             sv.add_argument("--port", type=int, default=8770)
             sv.add_argument("--dataset", default=None, help="папка записанного набора данных для BACKTEST")
             sv.add_argument("--no-browser", action="store_true")
+    au = sub.add_parser("audit", help="аудит индикаторов по живым данным (ядро vs эталон Pine/TradingView)")
+    au.add_argument("--tf", default="1h", choices=["1h", "4h", "1d"])
+    au.add_argument("--md", default=None, help="записать отчёт в Markdown")
+    au.add_argument("--n", type=int, default=20)
     a = ap.parse_args()
+    if a.cmd == "audit":
+        audit_cli(a)
+        return
     if a.cmd in ("serve", "web", "bot"):
         run(a)
         return
@@ -368,6 +376,55 @@ def doctor(a) -> None:
     rep.parent.mkdir(parents=True, exist_ok=True)
     rep.write_text("\n".join(out) + "\n", encoding="utf-8")
     print(f"\nОтчёт сохранён: {rep.resolve()}\n(токен управления в отчёт не включается; файл можно передать для диагностики)")
+
+
+def audit_cli(a) -> None:
+    """Живые свечи GeckoTerminal + котировки пула (read-only) → аудит индикаторов с формирующейся свечой."""
+    import datetime as dt
+    import tempfile
+
+    from . import audit as AU
+    from .analysis import analyze
+    from .live.collector import Collector
+    from .live.forming import live_bars, live_values
+    from .live.marketdb import MarketDB
+    from .live.transport import HttpTransport
+    from .store import Store
+    from .strategies import ANALYSIS_PARAMS
+    clk = lambda: dt.datetime.now(dt.UTC).timestamp()  # noqa: E731
+    with tempfile.TemporaryDirectory() as td:
+        st = Store(Path(td) / "audit.db")
+        col = Collector(st, HttpTransport(), clk)
+        now = int(clk())
+        col.tick(now)
+        db = MarketDB(st)
+        s, _ = db.candles(a.tf, now)
+        an = analyze(s, ANALYSIS_PARAMS[a.tf])
+        bars = live_bars(db, a.tf, now)
+        lv = live_values(s, bars, ANALYSIS_PARAMS[a.tf])
+        r = AU.audit(an, n=a.n, live=lv)
+        q = db.last_quote("pool")
+        st.close()
+    f = lambda t: dt.datetime.fromtimestamp(t, dt.UTC).strftime("%Y-%m-%d %H:%M") if t else "LIVE"  # noqa: E731
+    g = lambda x, k: "—" if x is None else (f"{x:,.0f}" if k == "obv" else f"{x:.6g}" if abs(x) < 1 else f"{x:.4f}")  # noqa: E731
+    out = [f"# Аудит индикаторов {a.tf.upper()} — {dt.datetime.fromtimestamp(now, dt.UTC):%Y-%m-%d %H:%M} UTC", "",
+           f"Данные: GeckoTerminal OHLCV (закрытых свечей {r['bars']}, последняя закрытая {f(r['last_closed_ts'])} UTC); "
+           f"формирующаяся свеча: open/high/low/close {', '.join(f'{b[k]:.6f}' for b in bars[-1:] for k in ('open', 'high', 'low', 'close'))} "
+           f"(close — StateView {q['mid']:.6f} USDG)." if bars and q else "", "",
+           f"Эталон — независимая реализация в семантике TradingView/Pine. {r['timestamp_convention']}. {r['value_convention']}.", "",
+           "| Индикатор | Статус | max abs diff | max rel diff |", "|---|---|---|---|"]
+    out += [f"| {k} | {v['status']} | {v['max_abs_diff']:.2e} | {v['max_rel_diff'] * 100:.2e}% |" for k, v in r["summary"].items()]
+    for k in ("rsi", "macd", "macd_signal", "macd_hist", "mfi", "cmf", "obv"):
+        out += ["", f"## {k}", "", "| timestamp (UTC) | close | ours | reference | diff | " + ("RSI SMA | RSI EMA | " if k == "rsi" else "") + "note |",
+                "|---|---|---|---|---|" + ("---|---|" if k == "rsi" else "") + "---|"]
+        for x in r["tables"][k]:
+            out.append(f"| {f(x['ts']) if x['close'] is not None else f(x['ts']) + ' LIVE'} | {g(x['close'], '')} | {g(x['ours'], k)} | {g(x['reference'], k)} | "
+                       f"{'—' if x['diff'] is None else f'{x['diff']:.1e}'} | " + (f"{g(x.get('rsi_sma'), k)} | {g(x.get('rsi_ema'), k)} | " if k == "rsi" else "") + f"{x['note']} |")
+    txt = "\n".join(out) + "\n"
+    print(txt)
+    if a.md:
+        Path(a.md).write_text(txt, encoding="utf-8")
+        print(f"Отчёт записан: {a.md}")
 
 
 if __name__ == "__main__":

@@ -267,3 +267,14 @@ def forward_performance(r, marks: list[dict]) -> dict:
     return {"curves": curves, "bh": bh, "table": table, "marks": len(marks),
             "bh_summary": {"equity": bh_eq[-1], "net_pnl": bh_eq[-1] - 1000, "max_drawdown_pct": performance.max_drawdown(bh_eq)} if bh_eq else None,
             "mark": {k: last[k] for k in ("ts", "mid", "source")} if last else None}
+
+
+
+def add_live_column(rows: list[dict], live: dict | None) -> None:
+    """Колонка LIVE (формирующаяся свеча) рядом со значением закрытой свечи — тот же формат."""
+    fmt = {"ema_fast": "{:.6g}", "ema_slow": "{:.6g}", "rsi": "{:.1f}", "macd_hist": "{:.3g}", "macd": "{:.3g}", "adx": "{:.1f}",
+           "atr": "{:.3g}", "bb_width": "{:.3f}", "mfi": "{:.1f}", "cmf": "{:.3f}", "obv": "{:.4g}", "relvol": "{:.2f}"}
+    for r in rows:
+        v = (live or {}).get(r["key"])
+        r["live"] = v
+        r["live_display"] = fmt.get(r["key"], "{:.4g}").format(v) if v is not None else "—"

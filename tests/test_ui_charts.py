@@ -88,3 +88,61 @@ def test_mobile_and_no_console_errors(ui_result):
     m = ui_result["mobile"]
     assert m["sw"] <= m["cw"] and m["rsiPaneH"] >= 40
     assert ui_result["errs"] == []
+
+
+@pytest.fixture(scope="module")
+def live_ui(tmp_path_factory):
+    ne = _node_env()
+    if ne is None:
+        pytest.skip("Node.js + Playwright не установлены — UI-тест пропущен")
+    import uvicorn
+    from replay import Clock, Market, run, ts
+    from tradinglab.live.worker import Worker
+    from tradinglab.store import Store
+    from tradinglab.web.app import create_app
+    d = tmp_path_factory.mktemp("live")
+    clock = Clock(ts("2026-11-04T20:02:00Z"))
+    w = Worker(Store(d / "trading_lab.db", durable=False), Market(clock).transport(), clock)
+    run(w, clock, ts("2026-11-04T20:40:00Z"))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(create_app(d, clock=clock), host="127.0.0.1", port=port, log_level="error"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.1)
+    try:
+        r = subprocess.run([ne[0], str(SCRIPT.parent / "live_check.js"), f"http://127.0.0.1:{port}/"], env=ne[1], capture_output=True, text=True, timeout=180)
+    finally:
+        srv.should_exit = True
+        th.join(10)
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    if "fatal" in out and "Executable doesn't exist" in out["fatal"]:
+        pytest.skip("браузер Playwright не установлен")
+    assert "fatal" not in out, out
+    return out
+
+
+def test_forming_candle_replaces_live_line(live_ui):
+    i = live_ui["info"]
+    assert i["lastTime"] == i["formingTime"] > i["closedTime"] and i["formingStatus"] == "FORMING"
+    assert ".35" in i["lastColor"] and i["lastClose"] == i["formingClose"]          # полупрозрачная, close = текущая цена
+    assert "FORMING" in i["markers"] and "Live" not in i["priceLines"]
+
+
+def test_tooltips_on_forming_and_closed_bars_all_panes(live_ui):
+    tf, tm, i = live_ui["tipForming"], live_ui["tipMacd"], live_ui["info"]
+    assert tf["shown"] == "block" and "FORMING" in tf["text"] and "закрытая" in tf["text"] and [x.upper() for x in tf["on"]] == ["ЦЕНА"]
+    for s in ("RSI(14)", "MACD", "Signal", "Histogram", "MFI", "CMF", "OBV", "EMA20", "BB"):
+        assert s in tf["text"], s
+    assert tm["shown"] == "block" and [x.upper() for x in tm["on"]] == ["MACD(12,26,9)"] and "закрытая свеча" in tm["text"]
+    assert f"{i['rsiClosed']:.1f}".replace(".", ",") in tm["text"]                   # то же значение, что в ряду ядра
+
+
+def test_mobile_fixed_bar_values_block(live_ui):
+    m = live_ui["mob"]
+    assert m["barinfo"] == "block" and m["tip"] != "block" and "MACD" in m["text"] and m["sw"] <= m["cw"]
+    assert live_ui["errs"] == []

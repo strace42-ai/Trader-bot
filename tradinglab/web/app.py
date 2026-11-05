@@ -22,6 +22,7 @@ from ..analysis import analyze
 from ..candles import GRACE_SEC, TF_SEC
 from ..forward import ControlError, ForwardRunner, executor_from_db
 from ..live import config as LC
+from ..live.forming import live_bars, live_values
 from ..live.health import preflight
 from ..live.marketdb import MarketDB
 from ..store import Store
@@ -132,6 +133,33 @@ class Lab:
             out[tf] = {"decided_ts": d[0].get("decided_ts"), "bar_ts": d[0]["bar_ts"], "action": d[0]["action_final"]} if d else None
         return out
 
+    def live_block(self, tf: str, a=None) -> dict:
+        """Формирующаяся (и, если GT ещё не отдал закрытую, предварительная) свеча + значения индикаторов:
+        на последней ЗАКРЫТОЙ свече (как у стратегий) и LIVE на формирующейся (только отображение)."""
+        now = self.now()
+        a = a if a is not None else self.live_analysis(tf)
+        bars = live_bars(self.db, tf, now)
+        vals = live_values(a.s, bars, a.p) if a is not None else {"closed": None, "live": None}
+        lv, _ = self.db.kv("last_valid_quote")
+        return {"tf": tf, "now": now, "bars": bars, "values": vals, "quote": lv, "next_close": views.next_close(tf, now),
+                "note": "формирующаяся свеча и LIVE-значения — только отображение; решения стратегий — по закрытым свечам"}
+
+    def audit(self, tf: str, mode: str) -> dict:
+        from .. import audit as AU
+        if mode == "BACKTEST":
+            a = self.an[tf]
+            res = AU.audit(a)
+            res["source"] = f"записанный набор {self.ds['id']}"
+            return res
+        a = self.live_analysis(tf)
+        if a is None:
+            return {"tf": tf, "error": "живых свечей ещё нет — бот не загрузил историю"}
+        rev = {r[0]: r[1] for r in self.store._all("SELECT ts, COUNT(*) FROM candle_revisions WHERE tf=? GROUP BY ts", (tf,))}
+        res = AU.audit(a, live=self.live_block(tf, a)["values"], revisions=rev)
+        res["source"] = "живые свечи GeckoTerminal из trading_lab.db (как их видят стратегии)"
+        res["revisions_total"] = sum(rev.values())
+        return res
+
     def live_analysis(self, tf: str):
         now = self.now()
         last = self.db.last_closed_ts(tf)
@@ -191,7 +219,7 @@ class Lab:
         now = self.now()
         a = self.live_analysis(tf)
         base = {"tf": tf, "mode": mode, "live": True, **(views.candles_payload(a) if a else {"candles": [], "series": {}})}
-        base["forming"] = self.db.forming(tf)
+        base["live"] = self.live_block(tf, a) if a is not None else {"bars": [], "values": {"closed": None, "live": None}}
         base["next_close"] = views.next_close(tf, now)
         base["next_available"] = base["next_close"] + GRACE_SEC
         r = self.runner()
@@ -204,6 +232,8 @@ class Lab:
         if fw["status"] == "NOT_STARTED" or t is None or a is None:
             base["trader"] = None
             base["preview"] = views.analysis_only(a) if a else None
+            if base["preview"]:
+                views.add_live_column(base["preview"]["indicators"], base["live"]["values"].get("live"))
             return base
         mark = {"ts": lv["ts"], "mid": lv["mid"], "source": lv["source"]} if lv and (not t.equity_curve or lv["ts"] >= t.equity_curve[-1]["ts"]) else None
         bh, _ = self.db.kv(f"bh:{r.experiment_id}")
@@ -216,6 +246,7 @@ class Lab:
             sm["bh_equity_same_time"], sm["vs_bh_usd"] = b, sm["equity"] - b
             sm["vs_bh_ratio"] = sm["equity"] / b if b else None
         base["trader"]["rejections"] = views.rejection_stats(t.decisions)
+        views.add_live_column(base["trader"]["analysis"]["indicators"], base["live"]["values"].get("live"))
         risk, _ = self.db.kv("risk", {})
         base["trader"]["monitor"] = {"last_decision_ts": t.decisions[-1].get("decided_ts") if t.decisions else None,
                                      **((risk or {}).get("traders") or {}).get(tf, {})}
@@ -334,6 +365,17 @@ def create_app(data_dir: Path | str = "data", dataset_path: Path | str = ds_mod.
         if mode not in ("BACKTEST", "FORWARD"):
             raise HTTPException(400, "mode: BACKTEST или FORWARD")
         return lab.terminal(_tf(tf), mode)
+
+    @app.get("/api/live/{tf}")
+    def live(tf: str):
+        return lab.live_block(_tf(tf))
+
+    @app.get("/api/audit/{tf}")
+    def audit(tf: str, mode: str = "FORWARD"):
+        mode = mode.upper()
+        if mode not in ("BACKTEST", "FORWARD"):
+            raise HTTPException(400, "mode: BACKTEST или FORWARD")
+        return lab.audit(_tf(tf), mode)
 
     @app.get("/api/performance")
     def performance():

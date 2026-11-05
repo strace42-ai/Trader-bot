@@ -109,7 +109,8 @@ def test_live_overview_and_terminal_show_actual_bot_data(live):
     assert {s["key"]: s["status"] for s in o["sources"]}["rpc"] == "OK"
     d = c.get("/api/terminal/1h?mode=FORWARD").json()
     assert d["trader"] is None and d["preview"] and len(d["candles"]) == w.collector.db.count("1h")
-    assert d["forming"]["ts"] > d["candles"][-1]["time"] and d["next_close"] > clock.t
+    fb = d["live"]["bars"][-1]
+    assert fb["status"] == "FORMING" and fb["time"] > d["candles"][-1]["time"] and d["next_close"] > clock.t
     assert c.post("/api/forward/start", headers=hdr(app)).json()["status"] == "RUNNING"
     run(w, clock, ts("2026-11-04T23:10:00Z"))
     d = c.get("/api/terminal/1h?mode=FORWARD").json()
