@@ -215,6 +215,15 @@
     return `<div class="metric"><div class="k" title="${esc(k)}">${esc(k)}</div><div class="v ${cls}">${v}</div><div class="s">${s || "&nbsp;"}</div></div>`;
   }
 
+  function monitorInfo(tf) {
+    const m = T[tf].data?.trader?.monitor;
+    if (!m) return "";
+    const pc = { FULL: "pos", DEGRADED: "warnline", NONE: "neg" }[m.protection] || "";
+    const sc = m.last_stop_check;
+    return `последнее решение ${m.last_decision_ts ? fmt.time(m.last_decision_ts) : "— (свеча ещё не закрылась)"} · стоп проверен ${sc ? fmt.time(sc.ts) + " (" + Lab.age(Math.round(Date.now() / 1000 - sc.ts)) + ")" : "—"}` +
+      (m.position ? ` · защита <b class="${pc}">${esc(m.protection || "—")}</b>` : "");
+  }
+
   function closeInfo(tf) {
     const d = T[tf].data;
     if (d.mode !== "FORWARD" || !d.next_close) return "";
@@ -244,7 +253,7 @@
     $(tf, "state").innerHTML = `<span class="badge ${stc}">${esc(tr.state)}</span>`;
     $(tf, "sample").innerHTML = `<span class="badge warn" title="Нужно ≥ 30 завершённых сделок для статистических выводов">${esc(sm.sample)}</span>
       <span class="badge">${esc(sm.validation)}</span>`;
-    $(tf, "asof").innerHTML = (d.mode === "FORWARD" ? closeInfo(tf) + " · " : "") + esc(sm.mark ? `оценка по ${fmt.price(sm.mark.mid)} @ ${fmt.time(sm.mark.ts)} · ${d.mode === "FORWARD" ? (tr.diagnostics.exec_model || "") : sm.cost_model}`
+    $(tf, "asof").innerHTML = (d.mode === "FORWARD" ? monitorInfo(tf) + " · " + closeInfo(tf) + " · " : "") + esc(sm.mark ? `оценка по ${fmt.price(sm.mark.mid)} @ ${fmt.time(sm.mark.ts)} · ${d.mode === "FORWARD" ? (tr.diagnostics.exec_model || "") : sm.cost_model}`
       : `${sm.mark_note || "проверенной котировки для оценки нет"}`);
     const pf = sm.profit_factor == null ? "—" : fmt.num(sm.profit_factor, 2);
     $(tf, "metrics").innerHTML = [
@@ -284,6 +293,14 @@
       h += `<div class="sec">Нет открытой позиции.</div>`;
     }
     if (pend) h += `<div class="warnline" style="margin-top:6px">Отложенный ордер: ${esc(pend.kind)} — исполнится по первой проверенной котировке после решения. ${esc(pend.reason || "")}</div>`;
+    const mon = tr.monitor;
+    if (tr.mode === "FORWARD" && p && mon) {
+      const txt = { FULL: "ПОЛНАЯ — стоп по проверенной ончейн-котировке (StateView)",
+        DEGRADED: "ОСЛАБЛЕНА — StateView недоступен: стоп только после 2 котировок DexScreener ниже уровня, цели не исполняются",
+        NONE: "НЕТ — котировки недостоверны: стоп не может быть исполнен, позиция не защищена" }[mon.protection] || "—";
+      h += `<div class="${{ FULL: "sec", DEGRADED: "warnline", NONE: "neg" }[mon.protection] || "sec"}" style="margin-top:6px">Защита: ${esc(txt)}${
+        mon.last_stop_check ? `<br>последняя проверка стопа ${fmt.dt(mon.last_stop_check.ts)} по ${fmt.price(mon.last_stop_check.price)} (${esc(mon.last_stop_check.source || "")})` : ""}</div>`;
+    }
     if (tr.mode === "FORWARD" && p && !(pend && pend.kind === "EXIT"))
       h += `<div style="margin-top:8px"><button class="btn danger" data-close="${tf}">CLOSE POSITION</button></div>`;
     el.innerHTML = h;
@@ -534,10 +551,14 @@
         RUNNING: `Эксперимент ${esc(f.experiment)} идёт с ${fmt.dt(f.started_at)}: трейдеры решают на каждой закрытой свече, Risk Monitor проверяет стопы на каждой котировке.`,
         PAUSED: `Эксперимент ${esc(f.experiment)} на паузе: новые входы запрещены, стопы и выходы защищают позиции.`,
         STOPPED: `Эксперимент ${esc(f.experiment)} остановлен: решения не принимаются, позиции (если есть) сохранены и оцениваются по рынку.` }[f.status];
-      b.innerHTML = `<b>FORWARD · LIVE · ${Lab.STATUS_RU[f.status]}.</b> ${st} Бот: <b class="${w.alive ? "pos" : "neg"}">${w.alive ? "работает" : "не запущен"}</b>.
+      const ig = overview.live.integrity, ld = overview.live.last_decisions || {};
+      const lastDec = ["1h", "4h", "1d"].map((x) => `${x.toUpperCase()} ${ld[x]?.decided_ts ? fmt.time(ld[x].decided_ts) + " " + esc(ld[x].action) : "—"}`).join(" · ");
+      b.innerHTML = `${ig && ig.ok === false ? `<div class="neg"><b>Целостность состояния нарушена:</b> ${esc((ig.issues || []).join("; "))}. Не продолжайте, запустите diagnose.bat.</div>` : ""}
+        <b>FORWARD · LIVE · ${Lab.STATUS_RU[f.status]}.</b> ${st} Бот: <b class="${w.alive ? "pos" : "neg"}">${w.alive ? "работает" : "не запущен"}</b>${w.age != null ? " (heartbeat " + esc(Lab.age(w.age)) + ")" : ""}.
+        Последние решения: ${lastDec}.
         ${rk.entry_blockers?.length ? `<span class="warnline">Новые входы заблокированы: ${esc(rk.entry_blockers.join("; "))}.</span>` : ""}
         ${rk.unprotected?.length ? `<span class="neg">Позиции ${esc(rk.unprotected.join(", ").toUpperCase())} без проверки: котировка недостоверна.</span>` : ""}
-        Исполнение — оценочная модель (CLMM активного диапазона), не подтверждённые свопы.`;
+        Исполнение — оценка (локальный расчёт свопа v4 по состоянию StateView), не точный quote и не подтверждённые свопы.`;
     }
   }
 
@@ -563,7 +584,7 @@
     // FORWARD: живое обновление (локальный сервер; внешние источники опрашивает только бот по своему расписанию)
     setInterval(() => refresh(mode === "FORWARD").catch(() => {}), 15000);
     setInterval(() => TFS.forEach((tf) => { if (T[tf].data?.mode === "FORWARD") $(tf, "asof").innerHTML = T[tf].data.trader
-      ? closeInfo(tf) + " · " + esc(T[tf].data.trader.summary.mark ? `оценка по ${fmt.price(T[tf].data.trader.summary.mark.mid)} @ ${fmt.time(T[tf].data.trader.summary.mark.ts)}` : "")
+      ? monitorInfo(tf) + " · " + closeInfo(tf) + " · " + esc(T[tf].data.trader.summary.mark ? `оценка по ${fmt.price(T[tf].data.trader.summary.mark.mid)} @ ${fmt.time(T[tf].data.trader.summary.mark.ts)}` : "")
       : closeInfo(tf); }), 1000);
   }
   init();

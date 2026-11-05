@@ -67,7 +67,7 @@ const Lab = (() => {
     const fwd = mode === "FORWARD";
     const srcChips = o.sources.map((s) => {
       const c = { OK: "good", DEGRADED: "warn", DOWN: "crit" }[s.status] || "idle";
-      return `<span class="chip ${c}" title="${esc(s.note)}${s.ts ? " · последний успех " + esc(fmt.dt(s.ts)) : ""}"><i></i>${esc(s.name)}: ${esc(s.status)}</span>`;
+      return `<span class="chip ${c}" title="${esc(s.note)}${s.ts ? " · последний успех " + esc(fmt.dt(s.ts)) : ""}"><i></i>${esc(s.name)}: ${esc(s.status)}${s.age != null ? " · " + esc(age(s.age)) : ""}</span>`;
     }).join("");
     const wChip = `<span class="chip ${w.alive ? "good" : "crit"}" title="${w.alive ? "heartbeat " + age(w.age) : "heartbeat нет или устарел"}"><i></i>Бот: ${w.alive ? "РАБОТАЕТ" : "НЕ ЗАПУЩЕН"}</span>`;
     const fwBadge = `<span class="badge ${STATUS_BADGE[fw.status] || ""}">FORWARD: ${STATUS_RU[fw.status]}</span>`;
@@ -141,7 +141,18 @@ const Lab = (() => {
   };
 
   async function command(cmd, tf) {
-    if (CONFIRM[cmd] && !window.confirm(CONFIRM[cmd])) return;
+    if (cmd === "start") {
+      let pf;
+      try { pf = await api("/api/preflight"); } catch (e) { window.alert("Проверка готовности недоступна: " + e.message); return; }
+      const bad = pf.checks.filter((c) => !c.ok && c.level === "required"), warn = pf.checks.filter((c) => !c.ok && c.level !== "required");
+      if (!pf.ok) {
+        window.alert("START невозможен — проверка готовности не пройдена:\n\n" + bad.map((c) => `✗ ${c.name}: ${c.detail}`).join("\n") +
+          "\n\nИсправьте и повторите. Подробная диагностика: diagnose.bat");
+        return;
+      }
+      const ok = pf.checks.filter((c) => c.ok).map((c) => `✓ ${c.name}`).join("\n");
+      if (!window.confirm(CONFIRM.start + "\n\nПроверка готовности пройдена:\n" + ok + (warn.length ? "\n\nПредупреждения:\n" + warn.map((c) => `! ${c.name}: ${c.detail}`).join("\n") : ""))) return;
+    } else if (CONFIRM[cmd] && !window.confirm(CONFIRM[cmd])) return;
     try {
       await api(`/api/forward/${cmd}${tf ? "?tf=" + tf : ""}`, { method: "POST" });
     } catch (e) {

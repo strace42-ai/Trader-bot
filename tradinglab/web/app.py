@@ -22,6 +22,7 @@ from ..analysis import analyze
 from ..candles import GRACE_SEC, TF_SEC
 from ..forward import ControlError, ForwardRunner, executor_from_db
 from ..live import config as LC
+from ..live.health import preflight
 from ..live.marketdb import MarketDB
 from ..store import Store
 from ..strategies import ANALYSIS_PARAMS
@@ -118,7 +119,18 @@ class Lab:
                              "next_close": views.next_close(tf, now), "next_available": views.next_close(tf, now) + GRACE_SEC}
                         for tf in TFS},
             "events": self.db.events(30), "worker": self.worker_status(),
+            "integrity": self.db.kv("integrity", {})[0], "preflight": self.db.kv("preflight", None)[0],
+            "last_decisions": self.last_decisions(),
         }
+
+    def last_decisions(self) -> dict:
+        last = self.store.last_control()
+        exp = last["experiment_id"] if last else None
+        out = {}
+        for tf in TFS:
+            d = self.store.decisions(exp, tf, 1) if exp else []
+            out[tf] = {"decided_ts": d[0].get("decided_ts"), "bar_ts": d[0]["bar_ts"], "action": d[0]["action_final"]} if d else None
+        return out
 
     def live_analysis(self, tf: str):
         now = self.now()
@@ -204,6 +216,9 @@ class Lab:
             sm["bh_equity_same_time"], sm["vs_bh_usd"] = b, sm["equity"] - b
             sm["vs_bh_ratio"] = sm["equity"] / b if b else None
         base["trader"]["rejections"] = views.rejection_stats(t.decisions)
+        risk, _ = self.db.kv("risk", {})
+        base["trader"]["monitor"] = {"last_decision_ts": t.decisions[-1].get("decided_ts") if t.decisions else None,
+                                     **((risk or {}).get("traders") or {}).get(tf, {})}
         return base
 
     def performance(self) -> dict:
@@ -286,6 +301,24 @@ def create_app(data_dir: Path | str = "data", dataset_path: Path | str = ds_mod.
     @app.get("/performance")
     def perf_page():
         return _page("performance.html")
+
+    import logging
+    log = logging.getLogger("tradinglab.web")
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception):
+        import traceback
+        log.error("API %s %s failed: %s\n%s", request.method, request.url.path, exc, traceback.format_exc())
+        return JSONResponse({"detail": f"внутренняя ошибка: {type(exc).__name__}: {exc} (подробности — data/logs/tradinglab.log)"}, status_code=500)
+
+    @app.get("/api/preflight")
+    def preflight_api():
+        pf = preflight(lab.store, lab.now())
+        w = lab.worker_status()
+        pf["checks"].insert(0, {"name": "Фоновый бот", "ok": w["alive"], "detail": f"heartbeat {w['age']} с назад" if w.get("age") is not None
+                                else "не запущен", "level": "required"})
+        pf["ok"] = pf["ok"] and w["alive"]
+        return pf
 
     @app.get("/api/health")
     def health():

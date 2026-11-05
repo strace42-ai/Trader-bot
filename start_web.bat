@@ -35,7 +35,8 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo   Проверяю зависимости ...
-".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check -r requirements.txt
+if not exist "data\logs" mkdir "data\logs"
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r requirements.txt > "data\logs\install.log" 2>&1
 if errorlevel 1 goto :fail
 
 ".venv\Scripts\python.exe" -m tradinglab web %*
@@ -46,6 +47,8 @@ exit /b 0
 
 :fail
 echo.
-echo   Ошибка установки. Проверьте подключение к интернету (нужно только при первом запуске для pip) и повторите.
+echo   Ошибка установки зависимостей. Подробности: data\logs\install.log
+echo   Частые причины: нет интернета (нужен только при первом запуске), антивирус/прокси блокирует pip,
+echo   повреждено окружение .venv (удалите папку .venv и запустите снова). Диагностика: diagnose.bat
 pause
 exit /b 1

@@ -40,16 +40,30 @@ class Collector:
         self.errors = (self.errors + [{"ts": now, "where": where, "error": msg[:300]}])[-50:]
         self.db.event(now, "source_error", {"where": where, "error": msg[:300]})
 
-    def tick(self, now: float | None = None) -> dict:
+    def tick_fast(self, now: float | None = None) -> dict:
+        """Быстрая линия (каждую секунду): котировки StateView и DexScreener — для Risk Monitor."""
         now = int(now if now is not None else self.clock())
-        out = {"new_bars": {}, "quote": False, "now": now}
-        if not self.started:
-            out["new_bars"] = self.backfill(now)
-            self.started = True
+        out = {"quote": False, "now": now}
         if self._due("pool_state", C.SCHEDULE["pool_state"], now):
             out["quote"] |= self._pool(now)
         if self._due("dexscreener", C.SCHEDULE["dexscreener"], now):
             out["quote"] |= self._ds(now)
+        self.db.kv_set("health", self.tr.health.snapshot(), now)
+        return out
+
+    def tick_slow(self, now: float | None = None) -> dict:
+        """Медленная линия (отдельный поток): свечи, история, тики пула, события Swap, газ, контекст.
+        Лимиты этих источников не задерживают проверку стопов."""
+        now = int(now if now is not None else self.clock())
+        out = {"new_bars": {}, "now": now}
+        if not self.started:
+            out["new_bars"] = self.backfill(now)
+            self.started = True
+        for tf in TFS:
+            nb = self._candles(tf, now)
+            if nb:
+                out["new_bars"].setdefault(tf, []).extend(nb)
+        self._ticks(now)
         if self._due("swaps", C.SCHEDULE["swaps"], now):
             self._swaps(now)
         if self._due("context", C.SCHEDULE["context"], now):
@@ -57,12 +71,30 @@ class Collector:
         gas, _ = self.db.kv("gas", {})
         if self._due("gas", C.SCHEDULE["gas"], now) or (gas is not None and gas.get("usd_per_swap") is None and self._due("gas_retry", 60, now)):
             self._gas(now)                  # газ в USD требует цены ETH: после первого контекста пересчитывается сразу
-        for tf in TFS:
-            nb = self._candles(tf, now)
-            if nb:
-                out["new_bars"].setdefault(tf, []).extend(nb)
         self.db.kv_set("health", self.tr.health.snapshot(), now)
         return out
+
+    def tick(self, now: float | None = None) -> dict:
+        """Обе линии последовательно (тесты, разовая проверка)."""
+        now = int(now if now is not None else self.clock())
+        slow = self.tick_slow(now)
+        fast = self.tick_fast(now)
+        self._ticks(now)                    # тики — сразу после первого состояния пула
+        return {**slow, **fast}
+
+    def _ticks(self, now: int) -> None:
+        pool = self.db.last_quote("pool")
+        if not pool:
+            return
+        cached, _ = self.db.kv("pool_ticks")
+        stale = cached is None or now - cached.get("fetched_at", 0) >= C.SCHEDULE["pool_ticks"]
+        outside = cached is not None and not (cached["known"][0] < pool["tick"] < cached["known"][1])
+        if (stale or outside) and self._due("pool_ticks_try", 30, now):
+            try:
+                pt = S.pool_ticks(self.tr, pool["tick"])
+                self.db.kv_set("pool_ticks", {**pt, "fetched_at": now, "block": pool.get("block")}, now)
+            except Exception as e:  # noqa: BLE001 — без тиков новые входы блокируются, исполнение — только консервативно
+                self._err(now, "pool_ticks", e)
 
     # ------------------------------------------------------------------ свечи
     def expected_last_closed(self, tf: str, now: int) -> int:
@@ -131,15 +163,6 @@ class Collector:
             self._err(now, "pool_state", e)
             return False
         self.db.add_quote(now, "pool", ps["mid"], ps)
-        cached, _ = self.db.kv("pool_ticks")
-        stale = cached is None or now - cached.get("fetched_at", 0) >= C.SCHEDULE["pool_ticks"]
-        outside = cached is not None and not (cached["known"][0] < ps["tick"] < cached["known"][1])
-        if stale or outside:
-            try:
-                pt = S.pool_ticks(self.tr, ps["tick"])
-                self.db.kv_set("pool_ticks", {**pt, "fetched_at": now, "block": ps["block"]}, now)
-            except Exception as e:  # noqa: BLE001 — без тиков исполнение считается только консервативно
-                self._err(now, "pool_ticks", e)
         return True
 
     def _ds(self, now: int) -> bool:

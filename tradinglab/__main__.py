@@ -4,6 +4,7 @@
   python -m tradinglab bot   [--data data]                                фоновый бот без интерфейса
   python -m tradinglab web   [--port 8770] [--data data]                  только интерфейс (бот запущен отдельно)
   python -m tradinglab check [--data DIR]                                 разовая проверка источников живых данных
+  python -m tradinglab doctor [--data data] [--port 8770]                 полная диагностика + файл отчёта для поддержки
   python -m tradinglab backtest --fixtures datasets/fables_2026-11-05 [--now 2026-11-05T13:27:00Z] [--db PATH] [--json OUT]
 """
 from __future__ import annotations
@@ -39,9 +40,13 @@ def main() -> None:
     b.add_argument("--db", default=None, help="сохранить журнал в отдельную БД Trading Lab")
     b.add_argument("--json", default=None)
     for name, hlp in (("serve", "фоновый бот + локальная панель (http://127.0.0.1:PORT/)"), ("web", "только локальная панель"),
-                      ("bot", "только фоновый бот (без интерфейса)"), ("check", "разовая проверка источников живых данных")):
+                      ("bot", "только фоновый бот (без интерфейса)"), ("check", "разовая проверка источников живых данных"),
+                      ("doctor", "полная диагностика и файл отчёта")):
         sv = sub.add_parser(name, help=hlp)
         sv.add_argument("--data", default="data", help="папка для trading_lab.db")
+        if name == "doctor":
+            sv.add_argument("--port", type=int, default=8770)
+            sv.add_argument("--offline", action="store_true", help="без проверки живых источников")
         if name in ("serve", "web"):
             sv.add_argument("--host", default="127.0.0.1")
             sv.add_argument("--port", type=int, default=8770)
@@ -53,6 +58,9 @@ def main() -> None:
         return
     if a.cmd == "check":
         check(a)
+        return
+    if a.cmd == "doctor":
+        doctor(a)
         return
     d = Path(a.fixtures)
     now = _ts(a.now) if a.now else int(dt.datetime.now(dt.UTC).timestamp())
@@ -219,6 +227,147 @@ def check(a) -> None:
         print(f"    {tf} {strat['id']}: {d['action']} · свеча {f(d['bar_ts'])} · условий PASS {sum(1 for c in d['conditions'] if c['ok'])}, "
               f"FAIL {len(bad)}" + (f" · первый блокер: {bad[0]['name']} ({bad[0]['value']} vs {bad[0]['req']})" if bad else ""))
     print(f"  Ошибки: {col.errors or 'нет'}\n  Здоровье: {tr.health.snapshot()}\n")
+
+
+def doctor(a) -> None:
+    """Диагностика первого запуска. Ничего не меняет в рабочей базе (кроме проверки миграций) и не торгует."""
+    import datetime as dt
+    import importlib.metadata as md
+    import json as _json
+    import platform
+    import sys
+    import tempfile
+    import traceback
+    import urllib.request
+
+    data = Path(a.data)
+    out: list[str] = []
+    fails: list[str] = []
+
+    def P(line: str = "") -> None:
+        print(line)
+        out.append(line)
+
+    def res(name: str, ok: bool, detail: str = "", warn: bool = False) -> None:
+        mark = "OK  " if ok else ("WARN" if warn else "FAIL")
+        if not ok and not warn:
+            fails.append(name)
+        P(f"  [{mark}] {name}: {detail}")
+
+    now = int(dt.datetime.now(dt.UTC).timestamp())
+    P(f"FABLES Trading Lab — диагностика {dt.datetime.now(dt.UTC):%Y-%m-%d %H:%M:%S} UTC")
+    P(f"Версия: {__import__('tradinglab').LAB_VERSION}; папка программы: {Path(__file__).resolve().parent.parent}")
+    P("\n1. Python и зависимости")
+    res("Python", sys.version_info >= (3, 11), f"{platform.python_version()} ({platform.architecture()[0]}), {sys.executable}")
+    res("Платформа", True, f"{platform.platform()}")
+    req = {}
+    for line in (Path(__file__).resolve().parent.parent / "requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = line.split("#")[0].split(";")[0].strip()
+        if "==" in line:
+            n, v = line.split("==")
+            req[n.strip()] = v.strip()
+    for n, v in req.items():
+        try:
+            got = md.version(n)
+            res(f"пакет {n}", got == v, f"установлено {got}, требуется {v}", warn=got != v)
+        except md.PackageNotFoundError:
+            if n == "colorama" and sys.platform != "win32":
+                continue
+            res(f"пакет {n}", False, "не установлен — запустите start.bat (pip install -r requirements.txt)")
+    P("\n2. Хранилище")
+    try:
+        data.mkdir(parents=True, exist_ok=True)
+        t = data / ".write_test"
+        t.write_text("ok", encoding="utf-8")
+        t.unlink()
+        res("папка данных", True, str(data.resolve()))
+    except Exception as e:  # noqa: BLE001
+        res("папка данных", False, f"{data.resolve()}: {e}")
+    try:
+        from .live.health import integrity, restart_selftest
+        from .live.marketdb import MarketDB
+        from .store import Store
+        st = Store(data / "trading_lab.db")
+        res("база trading_lab.db", True, f"схема v{st.schema_version}, quick_check {st._one('PRAGMA quick_check')[0]}")
+        last = st.last_control()
+        P(f"       FORWARD: {last['to_status'] + ' ' + last['experiment_id'] if last else 'не запускался'}; экспериментов: "
+          f"{len(st.experiments())}")
+        ig = integrity(st)
+        res("целостность состояния FORWARD", ig["ok"], "; ".join(ig["issues"]) or f"проверено трейдеров: {len(ig['checked'])}")
+        for c in ig["checked"]:
+            P(f"       {c['tf']}: операций {c['fills']}, кеш {c['cash']}, FABLES {c['qty']}")
+        db = MarketDB(st)
+        w, _ = db.kv("worker")
+        if w:
+            age = now - w["ts"]
+            res("фоновый бот", age <= 30 and w.get("status") == "running", f"heartbeat {age} с назад, статус {w.get('status')}, pid {w.get('pid')}",
+                warn=True)
+        else:
+            res("фоновый бот", False, "ещё не запускался в этой папке данных", warn=True)
+        events = db.events(60)
+    except Exception as e:  # noqa: BLE001
+        res("база trading_lab.db", False, f"{type(e).__name__}: {e}")
+        P(traceback.format_exc())
+        events = []
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            r = restart_selftest(td)
+            res("самопроверка рестарта (временная база)", r["ok"], f"статус после перезапуска {r['status_restored']}, журнал неизменяем: "
+                f"{r['journal_append_only']}, целостность: {r['integrity']}")
+        except Exception as e:  # noqa: BLE001
+            res("самопроверка рестарта", False, f"{type(e).__name__}: {e}")
+    P("\n3. Панель")
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{a.port}/api/health", timeout=3) as r:
+            h = _json.loads(r.read())
+        res("панель", True, f"http://127.0.0.1:{a.port}/ отвечает (версия {h.get('version')}, бот: {'работает' if h['worker']['alive'] else 'нет'})")
+    except Exception as e:  # noqa: BLE001
+        import socket
+        busy = socket.socket().connect_ex(("127.0.0.1", a.port)) == 0
+        res("панель", False, f"порт {a.port} {'занят другой программой' if busy else 'свободен — панель не запущена'} ({type(e).__name__})", warn=not busy)
+    if not a.offline:
+        P("\n4. Живые источники (временная база, без торговли)")
+        try:
+            from .live.collector import Collector
+            from .live.health import preflight
+            from .live.transport import HttpTransport
+            from .store import Store as _S
+            with tempfile.TemporaryDirectory() as td:
+                st2 = _S(Path(td) / "probe.db")
+                tr = HttpTransport()
+                col = Collector(st2, tr, lambda: dt.datetime.now(dt.UTC).timestamp())
+                col.tick(now)
+                col._swaps(now)
+                col._gas(now)
+                pf = preflight(st2, int(dt.datetime.now(dt.UTC).timestamp()))
+                for c in pf["checks"]:
+                    if c["name"] == "Целостность состояния":
+                        continue
+                    res(c["name"], c["ok"], c["detail"], warn=c["level"] == "warning")
+                for e in col.errors:
+                    P(f"       ошибка: {e['where']}: {e['error']}")
+                st2.close()
+                tr.close()
+        except Exception as e:  # noqa: BLE001
+            res("живые источники", False, f"{type(e).__name__}: {e}")
+            P(traceback.format_exc())
+    P("\n5. Последние события данных")
+    for e in events[:40]:
+        P(f"  {dt.datetime.fromtimestamp(e['ts'], dt.UTC):%m-%d %H:%M:%S} {e['kind']}: "
+          f"{_json.dumps({k: v for k, v in e.items() if k not in ('ts', 'kind')}, ensure_ascii=False)[:240]}")
+    log = data / "logs" / "tradinglab.log"
+    P("\n6. Журнал ошибок (последние строки tradinglab.log)")
+    if log.exists():
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = [x for x in lines if " ERROR " in x or " WARNING " in x or "Traceback" in x or x.startswith(("  File", "    "))][-150:]
+        P("\n".join(tail) if tail else "  ошибок и предупреждений нет")
+    else:
+        P("  журнала ещё нет")
+    P("\nИтог: " + ("ВСЁ В ПОРЯДКЕ — можно нажимать START" if not fails else "ЕСТЬ ПРОБЛЕМЫ: " + ", ".join(fails)))
+    rep = data / "logs" / f"diagnostics-{dt.datetime.now(dt.UTC):%Y%m%d-%H%M%S}.txt"
+    rep.parent.mkdir(parents=True, exist_ok=True)
+    rep.write_text("\n".join(out) + "\n", encoding="utf-8")
+    print(f"\nОтчёт сохранён: {rep.resolve()}\n(токен управления в отчёт не включается; файл можно передать для диагностики)")
 
 
 if __name__ == "__main__":
