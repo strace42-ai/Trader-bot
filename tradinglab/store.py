@@ -113,7 +113,7 @@ class Store:
             raise StoreError("эксперимент не создан")
         if exp["mode"] != trader.mode:
             raise StoreError(f"режим трейдера {trader.mode} ≠ режиму эксперимента {exp['mode']}")
-        new = trader.drain()
+        new = trader.pending_records()  # буфер очищается только после успешного COMMIT
         if exp["mode"] == "FORWARD":
             for d in new["decisions"]:
                 if d["decided_at"] < exp["started_at"]:
@@ -140,6 +140,7 @@ class Store:
             c.execute("INSERT INTO trader_state VALUES(?,?,?,?,?) ON CONFLICT(experiment_id, trader) DO UPDATE SET "
                       "state_json=excluded.state_json, last_bar_ts=excluded.last_bar_ts, updated_at=excluded.updated_at",
                       (eid, tf, dump(st), st["last_bar_ts"], now_iso()))
+        trader.ack()  # только после COMMIT: при ROLLBACK записи остаются в буфере и уйдут при следующей попытке
 
     # ------------------------------------------------------------------ чтение
     def trader_state(self, exp_id: str, tf: str) -> dict | None:

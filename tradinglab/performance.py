@@ -8,7 +8,7 @@ from __future__ import annotations
 import statistics
 from decimal import Decimal
 
-from .execution import dec
+from .execution import dec, liquidation_value
 
 MIN_SAMPLE = 30
 
@@ -22,13 +22,36 @@ def max_drawdown(curve: list[float]) -> float:
     return mdd * 100
 
 
-def summarize(trader, bh_curve: list[dict] | None = None, bar_sec: int = 3600) -> dict:
+def latest_quote(candidates: list[dict | None]) -> dict | None:
+    """Самая свежая доступная котировка из кандидатов {ts, mid, source}. Используется как ОБЩАЯ точка оценки."""
+    c = [q for q in candidates if q and q.get("mid") and q["mid"] > 0]
+    return max(c, key=lambda q: q["ts"]) if c else None
+
+
+def candle_quote(series_1h) -> dict | None:
+    """Последняя закрытая 1H-свеча — самая свежая цена среди свечных рядов (1H закрывается чаще 4H и 1D)."""
+    if not series_1h or not series_1h.candles:
+        return None
+    k = series_1h.candles[-1]
+    return {"ts": k.ts + 3600, "mid": k.c, "source": "GeckoTerminal: close последней закрытой 1H-свечи"}
+
+
+def summarize(trader, bh_curve: list[dict] | None = None, bar_sec: int = 3600, mark: dict | None = None) -> dict:
+    """mark — общая котировка оценки. Если задана, equity/unrealized/сравнение с B&H считаются по ней для всех портфелей
+    одинаково (иначе 1D-портфель оценивался бы по закрытию дня, а 1H — на часы позже)."""
     p = trader.portfolio
     eq = [float(e["equity"]) for e in trader.equity_curve]
     initial = float(p.initial)
-    final = eq[-1] if eq else initial
     last = trader.equity_curve[-1] if trader.equity_curve else None
-    liq = dec(last["liq_value"]) if last else Decimal(0)
+    if mark is not None:
+        if last and mark["ts"] < last["ts"]:
+            raise ValueError("котировка оценки старше последней обработанной свечи трейдера")
+        liq = liquidation_value(p.qty, mark["mid"], trader.cost)
+        final = float(p.cash + liq)
+        eq = eq + [final]
+    else:
+        liq = dec(last["liq_value"]) if last else Decimal(0)
+        final = eq[-1] if eq else initial
     trades = trader.trades
     pnl = [float(t["net_pnl"]) for t in trades]
     wins, losses = [x for x in pnl if x > 0], [x for x in pnl if x <= 0]
@@ -60,7 +83,13 @@ def summarize(trader, bh_curve: list[dict] | None = None, bar_sec: int = 3600) -
         "validation": "NOT VALIDATED", "cost_model": trader.cost.name,
         "vs_cash_usd": final - initial,
     }
-    if bh_curve and last:
+    out["mark"] = mark
+    if bh_curve and mark is not None:
+        b = float(liquidation_value(dec(bh_curve[0]["qty"]), mark["mid"], trader.cost))
+        out["bh_equity_same_time"] = b
+        out["vs_bh_usd"] = final - b
+        out["vs_bh_pp"] = (final - b) / initial * 100
+    elif bh_curve and last:
         bh_at = [b for b in bh_curve if b["ts"] <= last["ts"]]
         if bh_at:
             b = float(bh_at[-1]["equity"])

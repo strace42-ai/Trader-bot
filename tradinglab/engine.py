@@ -77,9 +77,12 @@ class Trader:
         getattr(self, "equity_curve" if key == "equity" else key).append(rec)
         self._new[key].append(rec)
 
-    def drain(self) -> dict:
-        out, self._new = self._new, {"ops": [], "trades": [], "decisions": [], "equity": [], "events": []}
-        return out
+    def pending_records(self) -> dict:
+        """Записи, ещё не подтверждённые хранилищем. Буфер НЕ очищается: очистка — только ack() после COMMIT."""
+        return self._new
+
+    def ack(self) -> None:
+        self._new = {"ops": [], "trades": [], "decisions": [], "equity": [], "events": []}
 
     def equity_at(self, mid: float) -> Decimal:
         return self.portfolio.equity(liquidation_value(self.portfolio.qty, mid, self.cost))
@@ -94,10 +97,37 @@ class Trader:
                            "realized_pnl": None if pnl is None else str(pnl), "cost_model": self.cost.name})
 
     # ------------------------------------------------------------------ 1) исполнение намерения
-    def execute_pending(self, mid: float, ts: int, idx: int) -> None:
-        p, self.pending = self.pending, None
+    def blockers(self, data_ok: bool, global_kill: bool, price_ok: bool = True) -> list[str]:
+        """Активные запреты исполнения в порядке приоритета политики EXEC_POLICY."""
+        out = []
+        if not price_ok:
+            out.append("bad_price")
+        if not data_ok:
+            out.append("data_error")
+        if global_kill or self.risk.killed:
+            out.append("kill")
+        if self.paused:
+            out.append("pause")
+        return out
+
+    def execute_pending(self, mid: float, ts: int, idx: int, data_ok: bool = True, global_kill: bool = False,
+                        price_ok: bool = True) -> None:
+        p = self.pending
         if not p:
             return
+        blk = self.blockers(data_ok, global_kill, price_ok)
+        why = {"bad_price": "цена исполнения ненадёжна (конфликт данных на свече)",
+               "data_error": "данные невалидны (пропуск/ошибка свечей)", "kill": "kill switch", "pause": "симуляция на паузе"}
+        if p["kind"] == "ENTER" and blk:
+            self.pending = None
+            self._push("events", {"ts": ts, "type": "ENTRY_CANCELLED", "why": f"вход отменён: {why[blk[0]]}", "policy": blk[0]})
+            self.state = {"bad_price": "DATA_ERROR", "data_error": "DATA_ERROR", "kill": "RISK_OFF"}.get(blk[0], "PAUSED")
+            return
+        defer = [b for b in blk if R.EXEC_POLICY[b]["exit"] == "defer"]
+        if p["kind"] != "ENTER" and defer:
+            self._push("events", {"ts": ts, "type": "EXIT_DEFERRED", "why": f"выход отложен: {why[defer[0]]}", "policy": defer[0]})
+            return  # ордер остаётся pending до первой валидной цены
+        self.pending = None
         if p["kind"] == "ENTER":
             plan = p["plan"]
             if mid <= plan["stop"]:
@@ -168,10 +198,13 @@ class Trader:
         self.position = None
 
     # ------------------------------------------------------------------ 2) внутри свечи
-    def intrabar(self, o: float, h: float, l: float, ts: int, idx: int) -> None:
+    def intrabar(self, o: float, h: float, l: float, ts: int, idx: int, price_ok: bool = True) -> None:
         pos = self.position
         if not pos:
             return
+        if not price_ok and R.EXEC_POLICY["bad_price"]["exit"] == "defer":
+            self._push("events", {"ts": ts, "type": "STOP_CHECK_DEFERRED", "why": "цены свечи ненадёжны (конфликт данных)"})
+            return  # стоп/цель проверятся на первой свече с валидной ценой
         pos.max_high, pos.min_low = max(pos.max_high, h), min(pos.min_low, l)
         if l <= pos.stop:
             px = min(o, pos.stop)
@@ -212,12 +245,18 @@ class Trader:
         d["mode"], d["trader"], d["notes"] = self.mode, self.tf, notes
         eq = self.equity_at(k.c)
         R.on_bar(self.risk, self.rcfg, eq, d["decided_at"])
-        quality_ok = a.s.quality()["ok"]
+        q = a.s.quality_at(i)
+        quality_ok = q["ok"]
         if pos is None and self.pending is None:
             if not quality_ok:
                 self.state = "DATA_ERROR"
                 d["action_final"] = "NO_TRADE"
-                d["risk"] = [{"name": "Качество данных", "ok": False, "detail": f"{a.s.quality()}"}]
+                d["risk"] = [{"name": "Качество данных", "ok": False,
+                              "detail": f"пропусков {q['gaps_recent']}, невалидных свечей {q['invalid_recent']} за последние 50 баров"}]
+            elif global_kill:
+                self.state = "RISK_OFF"
+                d["action_final"] = "NO_TRADE"
+                d["risk"] = [{"name": "Global kill switch", "ok": False, "detail": "симуляция остановлена (STOP)"}]
             elif self.paused:
                 self.state = "PAUSED"
                 d["action_final"] = "NO_TRADE"
@@ -251,8 +290,9 @@ class Trader:
             d["action_final"] = "EXIT"
         else:
             d["action_final"] = "HOLD" if pos else d["action"]
-        if self.risk.killed and pos is not None and self.pending is None:
-            self.pending = {"kind": "EXIT", "frac": 1.0, "reason": "kill switch: " + self.risk.kill_reason, "decision_id": d["decision_id"]}
+        if (self.risk.killed or global_kill) and pos is not None and (self.pending is None or self.pending["kind"] == "ENTER"):
+            why = "global STOP: закрытие позиции" if global_kill else "kill switch: " + self.risk.kill_reason
+            self.pending = {"kind": "EXIT", "frac": 1.0, "reason": why, "decision_id": d["decision_id"]}
             self.state = "EXIT_PENDING"
         d["state"] = self.state
         self._push("decisions", d)
@@ -262,13 +302,16 @@ class Trader:
         return d
 
     # ------------------------------------------------------------------ одна закрытая свеча (backtest)
-    def process_bar(self, a: Analysis, i: int, htf: Analysis | None = None, j: int | None = None, **kw) -> dict | None:
+    def process_bar(self, a: Analysis, i: int, htf: Analysis | None = None, j: int | None = None, market=None, fund=None,
+                    global_kill: bool = False) -> dict | None:
         k = a.s.candles[i]
         if k.ts <= self.last_bar_ts:
             return None  # уже обработана: идемпотентность
-        self.execute_pending(k.o, k.ts, i)
-        self.intrabar(k.o, k.h, k.l, k.ts, i)
-        d = self.on_close(a, i, htf, j, **kw)
+        data_ok = a.s.quality_at(i)["ok"]
+        price_ok = not any(c["ts"] == k.ts for c in a.s.conflicts)
+        self.execute_pending(k.o, k.ts, i, data_ok=data_ok, global_kill=global_kill, price_ok=price_ok)
+        self.intrabar(k.o, k.h, k.l, k.ts, i, price_ok=price_ok)
+        d = self.on_close(a, i, htf, j, market=market, fund=fund, global_kill=global_kill)
         self.last_bar_ts = k.ts
         return d
 

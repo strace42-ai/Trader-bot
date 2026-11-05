@@ -40,6 +40,19 @@ RISK = {
 }
 
 
+# Политика исполнения отложенных ордеров и защитных стопов (версия — часть RISK_VERSION).
+#  entry: "cancel" — отложенный вход отменяется; exit: "execute" — закрытие разрешено, "defer" — ждать валидной цены.
+#  bad_price  — цена исполнения ненадёжна (конфликт источника на этой свече): вход отменяется, выход/стоп ждут валидной цены;
+#  data_error — пропуски/ошибки свечей в окне решения: вход отменяется, но выход по реальной цене разрешён;
+#  kill/pause — новые входы запрещены, безопасное закрытие позиции разрешено.
+EXEC_POLICY = {
+    "bad_price": {"entry": "cancel", "exit": "defer"},
+    "data_error": {"entry": "cancel", "exit": "execute"},
+    "kill": {"entry": "cancel", "exit": "execute"},
+    "pause": {"entry": "cancel", "exit": "execute"},
+}
+
+
 def params_hash(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:12]
 

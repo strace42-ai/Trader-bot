@@ -50,12 +50,26 @@ class Series:
         d = TF_SEC[self.tf]
         return Series(self.tf, [k for k in self.candles if k.ts + d <= t_decision])
 
+    def quality_at(self, i: int, lookback: int = 50) -> dict:
+        """Качество данных, известное на закрытии бара i: учитываются только пропуски, конфликты и невалидные строки
+        с временем не позже бара i (будущие дефекты ряда не влияют на прошлые решения — нет look-ahead)."""
+        if not self.candles:
+            return {"bars": 0, "gaps_recent": 0, "invalid_recent": 0, "conflicts_recent": 0, "ok": False, "as_of_ts": None}
+        i = max(0, min(i, len(self.candles) - 1))
+        ts_i = self.candles[i].ts
+        lo = self.candles[max(0, i - lookback)].ts
+        gaps = [g for g in self.gaps if lo <= g["after_ts"] < ts_i]
+        inv = [x for x in self.invalid if lo <= x["ts"] <= ts_i]
+        conf = [x for x in self.conflicts if lo <= x["ts"] <= ts_i]
+        return {"bars": i + 1, "as_of_ts": ts_i, "gaps_recent": len(gaps), "invalid_recent": len(inv),
+                "conflicts_recent": len(conf), "gaps": gaps, "ok": not gaps and not inv}
+
     def quality(self, lookback: int = 50) -> dict:
-        recent_from = self.candles[-lookback].ts if len(self.candles) >= lookback else (self.candles[0].ts if self.candles else 0)
-        recent_gaps = [g for g in self.gaps if g["after_ts"] >= recent_from]
-        return {"bars": len(self.candles), "gaps_total": len(self.gaps), "gaps_recent": len(recent_gaps),
-                "conflicts": len(self.conflicts), "invalid": len(self.invalid), "dropped_unclosed": self.dropped_unclosed,
-                "ok": not recent_gaps and not self.invalid}
+        """Качество на последнем закрытом баре + общие счётчики ряда (для диагностики)."""
+        q = self.quality_at(len(self.candles) - 1, lookback)
+        q.update({"bars": len(self.candles), "gaps_total": len(self.gaps), "conflicts": len(self.conflicts),
+                  "invalid": len(self.invalid), "dropped_unclosed": self.dropped_unclosed})
+        return q
 
 
 def is_closed(ts: int, tf: str, now: int, grace: int = GRACE_SEC) -> bool:
