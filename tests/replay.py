@@ -47,6 +47,7 @@ class Market:
         self.fees = {"BUY": 5000, "SELL": 10000}
         self.L = 20_000_000_000_000_000_000
         self.liquidity_usd = 700_000.0
+        self.rpc_fail: list[tuple[str, int, int]] = []         # (селектор eth_call или метод, с, по)
 
     # ------------------------------------------------------------------ рынок
     def price(self, now: int) -> float:
@@ -92,6 +93,9 @@ class Market:
                                "liquidity": {"usd": self.liquidity_usd, "base": 8e6, "quote": 1.8e5}, "fdv": 9e6, "marketCap": 2.1e6,
                                "volume": {"h24": 450000.0, "h1": 9000.0}, "txns": {"h24": {"buys": 220, "sells": 800}}, "priceChange": {"h24": 1.0}}]}
         if src == "rpc":
+            key = params[0]["data"][2:10] if what == "eth_call" else what
+            if any(k == key and a <= now < b for k, a, b in self.rpc_fail):
+                raise SourceError("rpc", "unavailable", f"сценарий: {key} недоступен")
             if what == "eth_blockNumber":
                 return hex(self.block(now))
             if what == "eth_gasPrice":
@@ -100,7 +104,14 @@ class Market:
                 sel = params[0]["data"][2:10]
                 if sel == C.SEL_GET_SLOT0:
                     sp = int((Decimal(10) ** 12 / Decimal(self.price(now))).sqrt() * Decimal(2 ** 96))
-                    return "0x" + "".join(hex(x)[2:].rjust(64, "0") for x in (sp, 304295, 0, 0))
+                    return "0x" + "".join(hex(x % (1 << 256))[2:].rjust(64, "0") for x in (sp, self.tick(now), 0, 0))
+                if sel == C.SEL_GET_TICK_BITMAP:      # инициализированные тики каждые 2000 (liquidityNet = 0 → L постоянна)
+                    w = int(params[0]["data"][-64:], 16)
+                    w = w - (1 << 256) if w >> 255 else w
+                    bm = sum(1 << b for b in range(256) if ((w << 8) + b) % 10 == 0)
+                    return "0x" + hex(bm)[2:].rjust(64, "0")
+                if sel == C.SEL_GET_TICK_LIQUIDITY:
+                    return "0x" + hex(self.L)[2:].rjust(64, "0") + "0" * 64
                 if sel == C.SEL_GET_LIQUIDITY:
                     return "0x" + hex(self.L)[2:].rjust(64, "0")
             if what == "eth_getLogs":
@@ -121,6 +132,10 @@ class Market:
             base = 2300.0 if "ethereum" in what else 78000.0
             return {"prices": [[(now - (60 - i) * 86400) * 1000, base + i * 2.0] for i in range(61)]}
         raise AssertionError(f"неожиданный запрос {src} {what}")
+
+    def tick(self, now: int) -> int:
+        import math
+        return math.floor(math.log(1e12 / self.price(now)) / math.log(1.0001))
 
     def block(self, now: int) -> int:
         return 106_000_000 + (now - 1_792_000_000) * 10

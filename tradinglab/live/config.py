@@ -20,6 +20,10 @@ CG_BASE = "https://api.coingecko.com/api/v3"
 # keccak256 сигнатур (проверены: tests/test_live_units.py)
 SEL_GET_SLOT0 = "c815641c"        # getSlot0(bytes32)
 SEL_GET_LIQUIDITY = "fa6793d5"    # getLiquidity(bytes32)
+SEL_GET_TICK_BITMAP = "1c7ccb4c"  # getTickBitmap(bytes32,int16)
+SEL_GET_TICK_LIQUIDITY = "caedab54"  # getTickLiquidity(bytes32,int24) → (liquidityGross, liquidityNet)
+TICKS_EACH_SIDE = 3          # liquidityNet загружается для N ближайших инициализированных тиков с каждой стороны
+TICKS_MAX_AGE = 600          # данные тиков старше — не используются (только консервативная оценка)
 TOPIC_SWAP = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f"  # Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)
 
 # лимиты запросов в минуту (ниже документированных/измеренных)
@@ -29,6 +33,7 @@ RATE_PER_MIN = {"geckoterminal": 8, "dexscreener": 30, "rpc": 60, "coingecko": 4
 SCHEDULE = {
     "dexscreener": 60,
     "pool_state": 60,        # StateView: getSlot0 + getLiquidity
+    "pool_ticks": 300,       # StateView: битовая карта тиков и liquidityNet ближайших тиков (или сразу при выходе цены из области)
     "swaps": 300,            # события Swap только этого пула (комиссия hook, поток сделок)
     "gas": 600,
     "context": 3600,         # CoinGecko: BTC/ETH/USDG
@@ -47,6 +52,8 @@ ENTRY_TTL = {"1h": 15 * 60, "4h": 45 * 60, "1d": 3 * 3600}
 
 # контроль котировки (Risk Monitor)
 QUOTE_MAX_AGE = 180          # котировка старше — недостоверна
+POOL_MAX_AGE = 120           # ончейн-котировка (StateView) старше — не подтверждённая
+POOL_MAX_LAG = 90            # StateView отстаёт от DexScreener больше — считается переставшим обновляться
 SOURCE_MAX_DIVERGENCE = 0.02  # пул (StateView) vs DexScreener
 JUMP_CONFIRM = 0.15          # скачок > 15% к предыдущей проверенной котировке требует подтверждения вторым тиком
 LIQ_DROP_RISK_OFF = 0.40     # ликвидность ниже 60% медианы 24 ч → новые входы запрещены
@@ -55,4 +62,5 @@ FEE_MAX_PPM = 30_000         # комиссия hook > 3% → новые вхо�
 WORKER_STALE_SEC = 30        # heartbeat старше — движок считается остановленным
 GAS_UNITS = 250_000          # консервативно для свопа v4 через роутер
 EXEC_SLIPPAGE = "0.001"      # задержка между котировкой и включением транзакции (оценка)
+DEGRADED_EXTRA_SLIPPAGE = "0.01"  # доп. проскальзывание защитного исполнения без StateView (только DexScreener)
 COMMAND_MAX_AGE = 60         # команда старше — не исполняется (EXPIRED)

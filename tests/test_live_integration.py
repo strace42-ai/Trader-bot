@@ -113,7 +113,8 @@ def test_execution_after_signal_at_live_quote(tmp_path):
     assert buy["signal_ts"] <= buy["received_ts"] <= buy["decided_ts"] < buy["exec_ts"]
     assert abs(float(buy["mid"]) - m.price(buy["exec_ts"])) < 1e-9          # цена пула в момент исполнения, не close свечи
     assert buy["expected_price"] != float(buy["mid"])
-    assert buy["exec_model"] == "v4-clmm-active-range-estimate" and buy["fee_ppm"] == 5000
+    assert buy["exec_model"] == "v4-local-quote-estimate" and buy["fee_ppm"] == 5000
+    assert "state-exact" in buy["exec_note"] and "не V4Quoter" in buy["exec_note"]
     assert "StateView" in buy["quote_source"]
 
 
@@ -325,3 +326,79 @@ def test_worker_runs_unattended_in_background_thread(tmp_path):
     th.join(5)
     hb, _ = w.db.kv("worker")
     assert not th.is_alive() and hb["status"] == "stopped" and hb["ticks"] > 5
+
+
+# ====================================================================== 11. политика котировок без StateView (регрессия)
+def stateview_down(m, a, b=10 ** 12):
+    m.rpc_fail += [(C.SEL_GET_SLOT0, a, b), (C.SEL_GET_LIQUIDITY, a, b)]
+
+
+def test_entries_require_onchain_quote_not_dexscreener_alone(tmp_path):
+    clock, m, st, w = started(tmp_path)
+    stateview_down(m, clock.t)
+    w.runner.traders["1h"].fn = enter_once()
+    run(w, clock, ts("2026-11-04T21:30:00Z"))
+    assert fills(st, w, "1h") == []
+    r = w.runner.risk
+    assert r["quote_level"] == "OFFCHAIN_ONLY" and not r["quote_valid"]
+    assert any("нет подтверждённой ончейн-котировки" in b for b in r["entry_blockers"])
+    ev = [e for e in st.events(w.runner.experiment_id, "1h") if e["type"] == "ENTRY_CANCELLED"]
+    assert ev and ev[-1]["policy"] == "entry_ttl"                # вход отменён по TTL, а не исполнен по DexScreener
+    marks = w.db.marks(w.runner.experiment_id)                  # оценки — только по ончейн-котировке и не после отказа StateView
+    assert all(mk["source"].startswith("StateView") and mk["quote_ts"] <= ts("2026-11-04T20:06:00Z") + C.POOL_MAX_AGE for mk in marks)
+
+
+def test_entries_require_fresh_pool_tick_data(tmp_path):
+    clock, m, st, w = started(tmp_path)
+    m.rpc_fail.append((C.SEL_GET_TICK_BITMAP, 0, 10 ** 12))    # цена пула есть, данных тиков нет
+    w.collector.db.kv_set("pool_ticks", {"fetched_at": 0, "known": [0, 1], "ticks": {}}, clock.t)
+    w.runner.traders["1h"].fn = enter_once()
+    run(w, clock, ts("2026-11-04T21:30:00Z"))
+    assert fills(st, w, "1h") == []
+    assert any("тиков пула" in b for b in w.runner.risk["entry_blockers"])
+
+
+def test_degraded_stop_needs_two_dexscreener_quotes_and_is_labelled(tmp_path):
+    clock, m, st, w, t = with_position(tmp_path)
+    stop = t.position.stop
+    x = (clock.t // 60 + 1) * 60
+    stateview_down(m, x)
+    m.price_override = [(x + 120, x + 10 * H, stop * 0.95)]
+    run(w, clock, x + 150)                                       # первая котировка DexScreener ниже стопа
+    assert t.position is not None
+    tr_risk = w.runner.risk["traders"]["1h"]
+    assert tr_risk["protection"] == "DEGRADED" and tr_risk["ds_below_since"] is not None
+    run(w, clock, x + 300)                                       # вторая подряд — защитная продажа
+    assert t.position is None
+    sell = fills(st, w, "1h")[-1]
+    assert "DEGRADED" in sell["reason"] and sell["exec_model"] == "conservative-fallback"
+    assert "ЗАЩИТА ОСЛАБЛЕНА" in sell["exec_note"] and "DexScreener" in sell["quote_source"]
+    assert sell["slip_bps"] > 100                                # доп. проскальзывание ≥ 1%
+    assert any(e["kind"] == "risk_degraded" for e in w.db.events(200))
+
+
+def test_degraded_mode_takes_no_profit_and_none_mode_does_nothing(tmp_path):
+    clock, m, st, w, t = with_position(tmp_path)
+    t1 = t.position.t1
+    x = (clock.t // 60 + 1) * 60
+    stateview_down(m, x)
+    m.price_override = [(x, x + H, t1 * 1.05)]                   # цель достигнута, но только по DexScreener
+    run(w, clock, x + 600)
+    assert t.position is not None and not t.position.t1_done
+    stop = t.position.stop
+    m.down.append(("dexscreener", clock.t, clock.t + 10 * H))     # теперь котировок нет совсем
+    m.price_override = [(clock.t, clock.t + 10 * H, stop * 0.5)]
+    run(w, clock, clock.t + 900)
+    assert t.position is not None                                # ничего не «исполнено»
+    assert w.runner.risk["traders"]["1h"]["protection"] == "NONE" and "1h" in w.runner.risk["unprotected"]
+
+
+def test_manual_close_executes_degraded_without_stateview(tmp_path):
+    clock, m, st, w, t = with_position(tmp_path)
+    stateview_down(m, clock.t)
+    run(w, clock, clock.t + 200)
+    w.runner.close_position("1h")
+    run(w, clock, clock.t + 120)
+    assert t.position is None
+    sell = fills(st, w, "1h")[-1]
+    assert "CLOSE POSITION" in sell["reason"] and "DEGRADED" in sell["reason"] and sell["exec_model"] == "conservative-fallback"

@@ -69,6 +69,33 @@ def pool_state(tr) -> dict:
             "liquidity": str(L), "mid": mid_from_sqrt(sp)}
 
 
+def _enc(v: int) -> str:
+    return hex(v % (1 << 256))[2:].rjust(64, "0")
+
+
+def pool_ticks(tr, tick: int, each_side: int = C.TICKS_EACH_SIDE) -> dict:
+    """Инициализированные тики в трёх словах битовой карты вокруг текущего тика + liquidityNet ближайших N с каждой стороны.
+    known = (lo, hi): внутри этих границ все инициализированные тики известны вместе с liquidityNet."""
+    sp = C.TICK_SPACING
+    word = (tick // sp) >> 8
+    inits = []
+    for w in (word - 1, word, word + 1):
+        r = tr.rpc("eth_call", [{"to": C.STATE_VIEW, "data": "0x" + C.SEL_GET_TICK_BITMAP + C.POOL_ID[2:] + _enc(w)}, "latest"])
+        bm = int(r, 16)
+        inits += [((w << 8) + b) * sp for b in range(256) if bm >> b & 1]
+    span_lo, span_hi = ((word - 1) << 8) * sp, (((word + 2) << 8) - 1) * sp
+    below = sorted((t for t in inits if t <= tick), reverse=True)
+    above = sorted(t for t in inits if t > tick)
+    ticks = {}
+    for t in below[:each_side] + above[:each_side]:
+        r = tr.rpc("eth_call", [{"to": C.STATE_VIEW, "data": "0x" + C.SEL_GET_TICK_LIQUIDITY + C.POOL_ID[2:] + _enc(t)}, "latest"])
+        ticks[t] = _signed(_word(r, 1))
+    lo = below[each_side] if len(below) > each_side else span_lo
+    hi = above[each_side] if len(above) > each_side else span_hi
+    return {"tick": tick, "ticks": {str(k): str(v) for k, v in ticks.items()}, "known": [lo, hi], "initialized_in_span": len(inits),
+            "nearest_below": below[0] if below else None, "nearest_above": above[0] if above else None}
+
+
 def mid_from_sqrt(sqrt_price_x96: int) -> float:
     """Цена FABLES в USDG. P = token1/token0 (сырые единицы); USDG за FABLES = 10^(DEC1-DEC0) / P."""
     p = (Decimal(sqrt_price_x96) / Decimal(2 ** 96)) ** 2

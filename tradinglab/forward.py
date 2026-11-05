@@ -50,7 +50,11 @@ class ControlError(Exception):
 def executor_from_db(db: MarketDB, cost: CostModel, now: int) -> LiveExecutor:
     """Одна и та же модель исполнения для сделок, оценки портфелей и B&H: свежее состояние пула, комиссии, газ."""
     pool = db.last_quote("pool")
-    pool = pool if pool and now - pool["ts"] <= LC.QUOTE_MAX_AGE else None
+    pool = dict(pool) if pool and now - pool["ts"] <= LC.QUOTE_MAX_AGE else None
+    if pool:
+        pt, _ = db.kv("pool_ticks")
+        if pt and now - pt.get("fetched_at", 0) <= LC.TICKS_MAX_AGE and pt["known"][0] < pool["tick"] < pt["known"][1]:
+            pool["ticks"], pool["known"] = pt["ticks"], pt["known"]   # иначе — только движение внутри текущего тика считается точным
     gas, _ = db.kv("gas", {})
     g = (gas or {}).get("usd_per_swap")
     return LiveExecutor(cost, pool, db.recent_fees(), Decimal(str(round(g, 6))) if g else None)
@@ -309,24 +313,32 @@ class ForwardRunner:
 
     # ------------------------------------------------------------------ Risk Monitor: котировка
     def build_quote(self, now: int) -> dict:
+        """Уровни котировки:
+          ONCHAIN       — свежий StateView (и согласие с DexScreener, если он свежий): входы, цели, сопровождение;
+          OFFCHAIN_ONLY — StateView недоступен, есть только DexScreener: защита ОСЛАБЛЕНА (см. on_quote), входы запрещены;
+          NONE          — свежих котировок нет: позиции не защищены, ничего не исполняется.
+        valid=True только для ONCHAIN без замечаний."""
         pool, ds = self.db.last_quote("pool"), self.db.last_quote("ds")
         fresh = lambda q: q is not None and now - q["ts"] <= LC.QUOTE_MAX_AGE  # noqa: E731
-        issues, q = [], {"ts": None, "mid": None, "source": None, "valid": False}
-        if fresh(pool):
-            q.update(ts=pool["ts"], mid=pool["mid"], source="StateView (on-chain)", block=pool.get("block"))
+        issues = []
+        # StateView считается живым, только если он продолжает обновляться: не старше POOL_MAX_AGE и не отстаёт от DexScreener
+        pool_live = pool is not None and now - pool["ts"] <= LC.POOL_MAX_AGE and (ds is None or pool["ts"] >= ds["ts"] - LC.POOL_MAX_LAG)
+        q = {"ts": None, "mid": None, "source": None, "valid": False, "level": "NONE",
+             "pool_age": now - pool["ts"] if pool else None, "ds_age": now - ds["ts"] if ds else None}
+        if pool_live:
+            q.update(ts=pool["ts"], mid=pool["mid"], source="StateView (on-chain)", block=pool.get("block"), level="ONCHAIN")
             if fresh(ds):
                 div = abs(ds["mid"] / pool["mid"] - 1)
                 q["divergence"] = div
                 if div > LC.SOURCE_MAX_DIVERGENCE:
                     issues.append(f"расхождение пул/DexScreener {div * 100:.2f}% > {LC.SOURCE_MAX_DIVERGENCE * 100:.0f}%")
-            else:
-                q["single_source"] = True
         elif fresh(ds):
-            q.update(ts=ds["ts"], mid=ds["mid"], source="DexScreener (нет свежего состояния пула)", single_source=True)
+            q.update(level="OFFCHAIN_ONLY", offchain={"ts": ds["ts"], "mid": ds["mid"], "source": "DexScreener"})
+            issues.append("нет свежей ончейн-котировки StateView: только DexScreener")
         else:
             issues.append("нет свежей котировки (старше %d с)" % LC.QUOTE_MAX_AGE)
         last_valid, _ = self.db.kv("last_valid_quote")
-        if q["mid"] and last_valid and not issues:
+        if q["level"] == "ONCHAIN" and last_valid and not issues:
             jump = q["mid"] / last_valid["mid"] - 1
             if abs(jump) > LC.JUMP_CONFIRM:
                 if self._jump is not None and q["ts"] > self._jump[1] and abs(q["mid"] / self._jump[0] - 1) < 0.02:
@@ -336,7 +348,7 @@ class ForwardRunner:
                         self._jump = (q["mid"], q["ts"])
                     issues.append(f"скачок цены {jump * 100:+.1f}% ждёт подтверждения следующей котировкой")
         q["issues"] = issues
-        q["valid"] = bool(q["mid"]) and not issues
+        q["valid"] = q["level"] == "ONCHAIN" and not issues
         q["age"] = now - q["ts"] if q["ts"] else None
         if q["valid"]:
             self._jump = None
@@ -344,7 +356,12 @@ class ForwardRunner:
         return q
 
     def entry_blockers(self, q: dict, now: int) -> list[str]:
-        b = [] if q["valid"] else ["котировка недостоверна: " + "; ".join(q["issues"])]
+        b = [] if q["valid"] else ["нет подтверждённой ончейн-котировки: " + "; ".join(q["issues"])]
+        pt, _ = self.db.kv("pool_ticks")
+        pool = self.db.last_quote("pool")
+        if q["valid"] and (not pt or now - pt.get("fetched_at", 0) > LC.TICKS_MAX_AGE or not pool
+                           or not (pt["known"][0] < pool["tick"] < pt["known"][1])):
+            b.append("нет свежих данных тиков пула (StateView) — исполнение нельзя оценить по состоянию пула")
         ds = self.db.last_quote("ds")
         med = statistics.median([x["liquidity_usd"] for x in self.db.quotes_since("ds", now - 86400) if x.get("liquidity_usd")] or [0]) or None
         if ds and med and ds.get("liquidity_usd") and ds["liquidity_usd"] < (1 - LC.LIQ_DROP_RISK_OFF) * med:
@@ -359,8 +376,16 @@ class ForwardRunner:
                 b.append(f"комиссия hook {side} {fees[side] / 1e4:.2f}% > {LC.FEE_MAX_PPM / 1e4:.0f}%")
         return b
 
+    PROTECTIVE = ("CLOSE POSITION", "EMERGENCY EXIT", "kill switch", "global STOP")
+
     def on_quote(self, now: int | None = None) -> dict:
-        """Каждая новая котировка: исполнение отложенных ордеров и защита позиций (стоп/trailing/цель) — независимо от ТФ."""
+        """Каждая новая котировка: исполнение отложенных ордеров и защита позиций — независимо от ТФ.
+        Политика защиты по уровню котировки:
+          FULL     (ONCHAIN)       — стоп/trailing/цель и выходы по проверенной ончейн-цене, модель v4-local-quote;
+          DEGRADED (OFFCHAIN_ONLY) — только защитные действия: стоп при ДВУХ подряд котировках DexScreener ниже уровня и ручное
+                                    закрытие/EMERGENCY; консервативная модель + доп. проскальзывание, пометка в журнале;
+                                    цели и плановые выходы ждут ONCHAIN;
+          NONE                     — ничего не исполняется, позиция помечается как незащищённая."""
         with self.lock:
             now = int(now if now is not None else self.clock())
             q = self.build_quote(now)
@@ -369,9 +394,12 @@ class ForwardRunner:
                 return q
             ex = self.executor()
             blockers = self.entry_blockers(q, now)
-            self.risk = {"ts": now, "quote_valid": q["valid"], "issues": q["issues"], "entry_blockers": blockers,
-                         "exec_model": ex.name if ex.pool else "conservative-fallback", "fees": self.db.recent_fees()}
-            unprotected = []
+            protection = {"ONCHAIN": "FULL", "OFFCHAIN_ONLY": "DEGRADED", "NONE": "NONE"}[q["level"]] if q["valid"] or q["level"] != "ONCHAIN" else "NONE"
+            prev_risk = self.risk or {}
+            self.risk = {"ts": now, "quote_valid": q["valid"], "quote_level": q["level"], "issues": q["issues"], "entry_blockers": blockers,
+                         "exec_model": ex.name, "fees": self.db.recent_fees(), "protection": protection, "traders": {}}
+            unprotected, degraded = [], []
+            off = q.get("offchain")
             for tf, t in self.traders.items():
                 t.ex = ex
                 idx = self.db.count(tf)
@@ -394,21 +422,72 @@ class ForwardRunner:
                     if q["valid"] and q["ts"] > (p.get("decided_ts") or 0):
                         t.on_quote(q["mid"], q["ts"], idx, price_ok=True, quote_source=q["source"])
                         handled = True
-                    elif not q["valid"]:
-                        unprotected.append(tf)
+                    elif off and any(k in (p.get("reason") or "") for k in self.PROTECTIVE) and off["ts"] > (p.get("decided_ts") or 0):
+                        self._degraded_exec(t, off, idx, now, p["reason"])
+                        handled = True
+                stop_checked = None
                 if t.position and self.status in ACTIVE and t.pending is None and not handled:
                     if q["valid"]:
                         t.intrabar(q["mid"], q["mid"], q["mid"], q["ts"], idx, price_ok=True, quote_source=q["source"])
+                        stop_checked = {"ts": q["ts"], "price": q["mid"], "protection": "FULL", "source": q["source"]}
+                    elif off:
+                        stop_checked = self._degraded_stop(t, tf, off, idx, now, prev_risk)
+                        degraded.append(tf)
                     else:
                         unprotected.append(tf)
+                elif t.position and not q["valid"] and t.pending is not None:
+                    (degraded if off else unprotected).append(tf)
+                prev_t = (prev_risk.get("traders") or {}).get(tf, {})
+                self.risk["traders"][tf] = {
+                    "position": t.position is not None,
+                    "protection": (stop_checked or {}).get("protection") or ("NONE" if tf in unprotected else "DEGRADED" if tf in degraded
+                                                                             else "FULL" if t.position and q["valid"] else None),
+                    "last_stop_check": stop_checked or prev_t.get("last_stop_check"),
+                    "stop": t.position.stop if t.position else None,
+                    "ds_below_since": (stop_checked or {}).get("ds_below_since"),
+                }
                 if any(t.pending_records().values()):
                     self.store.commit_bar(t)
             if unprotected:
                 self.risk["unprotected"] = sorted(set(unprotected))
-                self.db.event(now, "risk_unverified_quote", {"traders": self.risk["unprotected"], "issues": q["issues"]})
+                self.db.event(now, "risk_unprotected", {"traders": self.risk["unprotected"], "issues": q["issues"]})
+            if degraded:
+                self.risk["degraded"] = sorted(set(degraded))
+                self.db.event(now, "risk_degraded", {"traders": self.risk["degraded"], "issues": q["issues"]})
             self.db.kv_set("risk", self.risk, now)
             self._benchmark(q, ex, now)
             return q
+
+    def _degraded_executor(self, note: str) -> LiveExecutor:
+        """Без состояния пула: консервативная x·y=k-модель + дополнительное проскальзывание, явная пометка."""
+        gas, _ = self.db.kv("gas", {})
+        g = (gas or {}).get("usd_per_swap")
+        return LiveExecutor(self.cost, None, self.db.recent_fees(), Decimal(str(round(g, 6))) if g else None,
+                            exec_slippage=str(Decimal(LC.EXEC_SLIPPAGE) + Decimal(LC.DEGRADED_EXTRA_SLIPPAGE)), extra_note=note)
+
+    def _degraded_exec(self, t: Trader, off: dict, idx: int, now: int, reason: str) -> None:
+        t.ex = self._degraded_executor("ЗАЩИТА ОСЛАБЛЕНА: исполнение по котировке DexScreener без StateView")
+        t.pending["reason"] = reason + " [DEGRADED: DexScreener без StateView]"
+        t.on_quote(off["mid"], off["ts"], idx, price_ok=True, quote_source="DexScreener (DEGRADED, без StateView)")
+
+    def _degraded_stop(self, t: Trader, tf: str, off: dict, idx: int, now: int, prev_risk: dict) -> dict:
+        """Стоп по DexScreener: только при двух подряд котировках ниже уровня (разные ts); цель/trailing не исполняются."""
+        prev = ((prev_risk.get("traders") or {}).get(tf) or {}).get("ds_below_since")
+        below = off["mid"] <= t.position.stop
+        out = {"ts": off["ts"], "price": off["mid"], "protection": "DEGRADED", "source": "DexScreener"}
+        if not below:
+            return out
+        if prev is None or prev >= off["ts"]:
+            out["ds_below_since"] = off["ts"]          # первая котировка ниже стопа — ждём подтверждения
+            return out
+        t.ex = self._degraded_executor("ЗАЩИТА ОСЛАБЛЕНА: стоп по 2 котировкам DexScreener без StateView")
+        pos = t.position
+        meta = {"signal_ts": prev, "received_ts": off["ts"], "decided_ts": off["ts"], "exec_ts": off["ts"], "expected_price": pos.stop,
+                "quote_source": "DexScreener (DEGRADED, без StateView)"}
+        t._sell(1.0, min(off["mid"], pos.stop), off["ts"], idx,
+                f"стоп {pos.stop:.6g} [DEGRADED: 2 котировки DexScreener ниже уровня, StateView недоступен]",
+                extra_slip=self.cost.stop_slippage, kind="STOP", meta=meta)
+        return out
 
     # ------------------------------------------------------------------ Buy & Hold и синхронные оценки
     def _benchmark(self, q: dict, ex: LiveExecutor, now: int) -> None:

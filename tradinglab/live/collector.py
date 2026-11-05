@@ -131,6 +131,15 @@ class Collector:
             self._err(now, "pool_state", e)
             return False
         self.db.add_quote(now, "pool", ps["mid"], ps)
+        cached, _ = self.db.kv("pool_ticks")
+        stale = cached is None or now - cached.get("fetched_at", 0) >= C.SCHEDULE["pool_ticks"]
+        outside = cached is not None and not (cached["known"][0] < ps["tick"] < cached["known"][1])
+        if stale or outside:
+            try:
+                pt = S.pool_ticks(self.tr, ps["tick"])
+                self.db.kv_set("pool_ticks", {**pt, "fetched_at": now, "block": ps["block"]}, now)
+            except Exception as e:  # noqa: BLE001 — без тиков исполнение считается только консервативно
+                self._err(now, "pool_ticks", e)
         return True
 
     def _ds(self, now: int) -> bool:

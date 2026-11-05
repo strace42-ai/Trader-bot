@@ -21,6 +21,8 @@ def test_keccak_vectors_and_constants():
     assert keccak256(b"").hex() == "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
     assert selector("transfer(address,uint256)") == "a9059cbb"
     assert selector("getSlot0(bytes32)") == C.SEL_GET_SLOT0 and selector("getLiquidity(bytes32)") == C.SEL_GET_LIQUIDITY
+    assert selector("getTickBitmap(bytes32,int16)") == C.SEL_GET_TICK_BITMAP
+    assert selector("getTickLiquidity(bytes32,int24)") == C.SEL_GET_TICK_LIQUIDITY
     assert topic("Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)") == C.TOPIC_SWAP
 
 
@@ -45,44 +47,99 @@ def test_rpc_is_read_only():
             tr.rpc(m, [])
 
 
-def exe(L=14479089880190338852, fees=None):
-    return LiveExecutor(CONSERVATIVE_V1, {"liquidity": str(L)}, fees or {"BUY": 5000, "SELL": 10000, "source": "t"}, Decimal("0.01"))
+SP = 320811093993539540833496928083732450      # измеренный slot0 2026-11-05
+L0 = 14479089880190338852
+TICK = 304295
 
 
-def test_clmm_small_trade_matches_constant_product_with_virtual_reserves():
-    mid = 0.0609902496428114
-    f = exe().buy("500", mid)
-    # виртуальные резервы активного диапазона: x = L/√P (USDG), y = L·√P (FABLES)
-    sp = (Decimal(10) ** 12 / Decimal(mid)).sqrt()
-    x, y = Decimal(14479089880190338852) / sp / Decimal(10) ** 6, Decimal(14479089880190338852) * sp / Decimal(10) ** 18
+def pool(L=L0, ticks=None, known=(TICK - 5000, TICK + 5000), sp=SP, tick=TICK):
+    return {"sqrt_price_x96": str(sp), "tick": tick, "liquidity": str(L), "ticks": {str(k): str(v) for k, v in (ticks or {}).items()},
+            "known": list(known) if known else None}
+
+
+def exe(fees=None, **kw):
+    return LiveExecutor(CONSERVATIVE_V1, pool(**kw), fees or {"BUY": 5000, "SELL": 10000, "source": "t"}, Decimal("0.01"))
+
+
+MID = float(Decimal(10) ** 12 / (Decimal(SP) / Decimal(2) ** 96) ** 2)
+
+
+def test_single_range_matches_virtual_reserves():
+    f = exe().buy("500", MID)
+    sp = Decimal(SP) / Decimal(2) ** 96
+    x, y = Decimal(L0) / sp / Decimal(10) ** 6, Decimal(L0) * sp / Decimal(10) ** 18
     net = Decimal("500") * Decimal("0.995")
     cp = y * net / (x + net)
-    assert abs((f.qty / Decimal("0.999")) - cp) / cp < Decimal("1e-6")
-    assert f.fee_usd == Decimal("2.5") and f.model == "v4-clmm-active-range-estimate" and f.impact_usd > 0
+    assert abs((f.qty / Decimal("0.999")) - cp) / cp < Decimal("1e-9")
+    assert f.model == "v4-local-quote-estimate" and "state-exact" in f.note and "не V4Quoter" in f.note
 
 
-def test_clmm_round_trip_loses_fees_and_uses_observed_fee():
+def test_crossing_a_tick_closer_than_old_20_tick_assumption():
+    """Инициализированный тик в 3 тиках выше цены; за ним ликвидность падает в 4 раза. Продажа FABLES его пересекает."""
+    from tradinglab.live.clmm import simulate, sqrt_at_tick
+    up = TICK + 3
+    net = -(L0 * 3 // 4)
+    sp = Decimal(SP) / Decimal(2) ** 96
+    qty = Decimal(40_000)                                       # ≈ $2 400 — больше, чем помещается до тика
+    y_in = qty * Decimal("0.99") * Decimal(10) ** 18
+    r = simulate(sp, Decimal(L0), TICK, {up: net}, (TICK - 5000, TICK + 5000), y_in, False)
+    # ручной расчёт: до тика с L0, затем с L0 + net
+    spt = sqrt_at_tick(up)
+    y1 = Decimal(L0) * (spt - sp)
+    x1 = Decimal(L0) * (1 / sp - 1 / spt)
+    L1 = Decimal(L0 + net)
+    sp2 = spt + (y_in - y1) / L1
+    x2 = L1 * (1 / spt - 1 / sp2)
+    assert r["ok"] and r["crossed"] == [up] and abs(r["out"] - (x1 + x2)) / (x1 + x2) < Decimal("1e-20")
+    naive = Decimal(L0) * (1 / sp - 1 / (sp + y_in / Decimal(L0)))   # старая модель: L постоянна
+    assert naive > r["out"] * Decimal("1.001")                   # старая модель завышала выручку
+    f = exe(ticks={up: net}).sell(qty, MID)
+    assert "пересечено тиков: 1" in f.note and f.model == "v4-local-quote-estimate"
+
+
+def test_beyond_known_ticks_is_range_unknown_and_worst():
+    f = exe(known=(TICK - 10, TICK + 10)).sell(Decimal(3_000_000), MID)
+    assert f.model == "range-unknown→worst" and "exec_confidence=range-unknown" in f.note
+    g = exe(known=None).buy("50000", MID)                         # без данных тиков точна только сделка внутри текущего тика
+    assert g.model == "range-unknown→worst"
+    small = exe(known=None).buy("1", MID)
+    assert small.model == "v4-local-quote-estimate"
+
+
+def test_round_trip_loses_fees_and_uses_observed_fee():
     ex = exe(fees={"BUY": 7000, "SELL": 12000, "source": "t"})
-    b = ex.buy("500", 0.06)
-    s = ex.sell(b.qty, 0.06)
+    b = ex.buy("500", MID)
+    s = ex.sell(b.qty, MID)
     assert b.fee_ppm == 7000 and s.fee_ppm == 12000
     loss = Decimal("500") - (s.usd - s.gas_usd - b.gas_usd)
-    assert Decimal("0.019") * 500 < loss < Decimal("0.023") * 500     # 0,7% + 1,2% + 2×0,1% задержки исполнения + импакт
+    assert Decimal("0.019") * 500 < loss < Decimal("0.023") * 500   # 0,7% + 1,2% + 2×0,1% задержки исполнения + импакт
 
 
-def test_clmm_large_trade_falls_back_to_worse_estimate():
-    for L in (10 ** 17, 10 ** 19):                              # мелкий и крупный диапазон: всегда худшая оценка + пометка
-        ex = exe(L=L)
-        f = ex.buy("50000", 0.06)
-        cons = __import__("tradinglab.execution", fromlist=["quote_buy"]).quote_buy("50000", 0.06, CONSERVATIVE_V1.__class__(
-            **{**CONSERVATIVE_V1.__dict__, "slippage": Decimal("0.001")}))
-        assert f.model in ("clmm→conservative", "v4-clmm-range-risk") and "выход из диапазона" in f.note
-        assert f.qty <= cons.qty
+def test_model_reproduces_recorded_real_swaps():
+    """Проверка модели на 74 реальных свопах пула: состояние после свопа k → выход свопа k+1 (без изменения L между ними)."""
+    from tradinglab.live.clmm import simulate
+    ev = json.loads(EVID.read_text())
+    w = lambda d, i: int(d[2 + 64 * i:2 + 64 * (i + 1)], 16)  # noqa: E731
+    sg = lambda v: v - (1 << 256) if v >> 255 else v           # noqa: E731
+    rows = [dict(a0=sg(w(l["data"], 0)), a1=sg(w(l["data"], 1)), sp=w(l["data"], 2), L=w(l["data"], 3), tick=sg(w(l["data"], 4)),
+                 fee=w(l["data"], 5)) for l in ev["logs"]]
+    errs = []
+    for p, c in zip(rows, rows[1:]):
+        if p["L"] != c["L"]:
+            continue
+        buy = c["a0"] < 0
+        amt = Decimal(-c["a0"] if buy else -c["a1"]) * (1 - Decimal(c["fee"]) / Decimal(10 ** 6))
+        r = simulate(Decimal(p["sp"]) / Decimal(2) ** 96, Decimal(c["L"]), p["tick"], {}, (p["tick"] - 1000, p["tick"] + 1000), amt, buy)
+        act = Decimal(c["a1"] if buy else c["a0"])
+        errs.append(abs(r["out"] - act) / act)
+    errs.sort()
+    assert len(errs) >= 70 and errs[len(errs) // 2] < Decimal("1e-7") and errs[-1] < Decimal("1e-4")
 
 
 def test_executor_without_pool_state_is_labelled_fallback():
     f = LiveExecutor(CONSERVATIVE_V1, None, {}, None).buy("100", 0.06)
     assert f.model == "conservative-fallback" and f.fee_ppm == 5000 and "начальная выборка" in f.fee_source
+    assert "не V4Quoter" in f.note
 
 
 def test_closed_candles_immutable_revisions_recorded(tmp_path):
