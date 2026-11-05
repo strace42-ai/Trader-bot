@@ -155,3 +155,23 @@ def test_bad_params(tmp_path, no_network):
     c = client(create_app(tmp_path))
     assert c.get("/api/terminal/5m").status_code == 404
     assert c.get("/api/terminal/1h?mode=LIVE").status_code == 400
+
+
+def test_chart_series_are_exactly_core_arrays_and_hist_is_macd_minus_signal(tmp_path, no_network):
+    """Панель получает ряды индикаторов прямо из аналитического ядра (включая RSI(14)); фронтенд ничего не пересчитывает."""
+    from tradinglab import analysis, dataset
+    from tradinglab.strategies import ANALYSIS_PARAMS
+    c = client(create_app(tmp_path))
+    ds = dataset.load()
+    for tf in ("1h", "4h", "1d"):
+        d = c.get(f"/api/terminal/{tf}?mode=BACKTEST").json()
+        a = analysis.analyze(ds["series"][tf], ANALYSIS_PARAMS[tf])
+        ts = [k.ts for k in a.s.candles]
+        for key in ("rsi", "macd", "macd_signal", "macd_hist", "mfi", "cmf", "obv", "ema_fast", "ema_slow", "bb_upper", "bb_lower"):
+            core = [{"time": t, "value": v} for t, v in zip(ts, a.arr[key]) if v is not None]
+            assert d["series"][key] == core, (tf, key)
+        m = {p["time"]: p["value"] for p in d["series"]["macd"]}
+        sg = {p["time"]: p["value"] for p in d["series"]["macd_signal"]}
+        for p in d["series"]["macd_hist"]:
+            assert p["value"] == m[p["time"]] - sg[p["time"]]
+        assert a.p["rsi"] == 14 and len(d["series"]["rsi"]) == max(0, len(ts) - 14)    # RSI(14) с 15-й свечи

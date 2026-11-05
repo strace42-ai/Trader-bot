@@ -97,10 +97,11 @@ main { padding: 12px 16px 40px; display: flex; flex-direction: column; gap: 16px
                color: var(--text-secondary); font-size: 12px; }
 .chart-tools label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; white-space: nowrap; }
 .chart-tools .legend-dot { width: 10px; height: 2px; display: inline-block; }
-.chart { flex: 1; min-height: 620px; position: relative; }
+.chart { flex: 1; min-height: 700px; position: relative; }
 .legend { position: absolute; left: 10px; top: 6px; z-index: 3; pointer-events: none; font-family: var(--mono); font-size: 11px;
           color: var(--text-secondary); background: rgba(14, 17, 22, .78); padding: 2px 6px; border-radius: 3px; }
-.pane-labels { position: absolute; left: 10px; z-index: 3; pointer-events: none; font-size: 10.5px; color: var(--text-muted); }
+.pane-label { position: absolute; left: 10px; z-index: 3; pointer-events: none; font-size: 10.5px; color: var(--text-muted);
+              background: rgba(14, 17, 22, .7); padding: 0 4px; border-radius: 2px; white-space: nowrap; }
 .tip { position: absolute; z-index: 5; pointer-events: none; display: none; max-width: 340px; background: var(--surface-3);
        border: 1px solid var(--border-strong); border-radius: 4px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.5); }
 .tip .t { font-weight: 600; margin-bottom: 4px; }
@@ -111,7 +112,7 @@ main { padding: 12px 16px 40px; display: flex; flex-direction: column; gap: 16px
                    color: var(--text-secondary); text-align: center; }
 
 /* ---------------------------------------------------------------- правая колонка */
-.side { display: flex; flex-direction: column; min-width: 0; max-height: 700px; }
+.side { display: flex; flex-direction: column; min-width: 0; max-height: 780px; }
 .panel-h { padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 11px; text-transform: uppercase;
            letter-spacing: .05em; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .pos-card { padding: 8px 12px; border-bottom: 1px solid var(--border); }

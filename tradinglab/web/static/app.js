@@ -7,7 +7,11 @@
   const TFS = ["1h", "4h", "1d"];
   const TITLES = { "1h": "TRADER 1H", "4h": "TRADER 4H", "1d": "TRADER 1D" };
   const TABS = [["overview", "Обзор"], ["ind", "Индикаторы"], ["struct", "Структура"], ["onchain", "Ончейн"], ["dec", "Решения"], ["diag", "Диагностика"]];
-  const PANES = { MACD_HIST: 1, MFI: 2, CMF: 3, OBV: 4 };
+  const OSC = ["rsi", "macd", "mfi", "cmf", "obv"];          // панели осцилляторов сверху вниз (значения — из ядра)
+  const DIV_PANE = { RSI: "rsi", MACD_HIST: "macd", MFI: "mfi", CMF: "cmf", OBV: "obv" };
+  const OSC_LABEL = { rsi: "RSI(14) · 30 / 50 / 70", macd: "MACD(12,26,9) · гистограмма = MACD − Signal", mfi: "MFI(14) · 20 / 80",
+                      cmf: "CMF(20)", obv: "OBV" };
+  const rsiOn = () => store.get("lab.rsi", "1") !== "0";
   let mode = store.get("lab.mode", "FORWARD");
   let overview = null;
   const T = {}; // состояние терминалов
@@ -27,7 +31,8 @@
             ${[["ema", "EMA", "--s1"], ["bb", "Bollinger", "--text-muted"], ["vol", "Объём", "--text-muted"], ["levels", "Уровни S/R", "--text-secondary"],
                ["fib", "Fibonacci", "--s4"], ["struct", "Структура", "--s-violet"], ["div", "Дивергенции", "--up"], ["trades", "Сделки", "--text-primary"]]
               .map(([k, n, c]) => `<label><input type="checkbox" data-ov="${k}" ${k === "fib" ? "" : "checked"}><span class="legend-dot" style="background:var(${c})"></span>${n}</label>`).join("")}
-            <span class="spacer"></span><span class="muted">UTC · панели: MACD · MFI · CMF · OBV</span>
+            <label title="панель RSI(14) из аналитического ядра"><input type="checkbox" data-osc="rsi" ${rsiOn() ? "checked" : ""}><span class="legend-dot" style="background:var(--accent)"></span>RSI</label>
+            <span class="spacer"></span><span class="muted">UTC · панели: RSI · MACD · MFI · CMF · OBV</span>
           </div>
           <div class="chart" data-f="chart"><div class="legend" data-f="legend"></div><div class="tip" data-f="tip"></div></div>
         </div>
@@ -55,6 +60,7 @@
     }));
     sec.querySelectorAll("[data-flt]").forEach((s) => s.addEventListener("change", () => renderOps(tf)));
     sec.querySelectorAll("[data-ov]").forEach((c) => c.addEventListener("change", () => applyOverlays(tf)));
+    sec.querySelector('[data-osc="rsi"]').addEventListener("change", (e) => { store.set("lab.rsi", e.target.checked ? "1" : "0"); rebuildChart(tf); });
     return sec;
   }
   const $ = (tf, f) => document.querySelector(`#t-${tf} [data-f="${f}"]`);
@@ -73,8 +79,12 @@
       localization: { locale: "ru-RU" },
     });
     const pf = { type: "price", precision: 5, minMove: 0.00001 };
+    const p6 = { type: "price", precision: 6, minMove: 0.000001 };
     const line = (color, pane, extra = {}) => chart.addSeries(LW.LineSeries, { color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
                                                                                crosshairMarkerVisible: false, ...extra }, pane);
+    // индексы панелей: цена = 0, затем включённые осцилляторы по порядку OSC
+    const panes = {};
+    OSC.filter((k) => k !== "rsi" || rsiOn()).forEach((k, i) => (panes[k] = i + 1));
     const s = {};
     s.candle = chart.addSeries(LW.CandlestickSeries, { upColor: css("--up"), downColor: css("--down"), borderVisible: false,
       wickUpColor: css("--up"), wickDownColor: css("--down"), priceFormat: pf }, 0);
@@ -86,22 +96,91 @@
     s.bbU = line(css("--text-muted"), 0, bbOpt);
     s.bbM = line("#3a434e", 0, { ...bbOpt, lineStyle: LW.LineStyle.Dotted });
     s.bbL = line(css("--text-muted"), 0, bbOpt);
-    s.hist = chart.addSeries(LW.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "price", precision: 6, minMove: 0.000001 } }, 1);
-    s.macd = line(css("--s1"), 1, { lineWidth: 1, lastValueVisible: true, title: "MACD", priceFormat: { type: "price", precision: 6, minMove: 0.000001 } });
-    s.sig = line(css("--s2"), 1, { lineWidth: 1, priceFormat: { type: "price", precision: 6, minMove: 0.000001 } });
-    s.mfi = line(css("--s-violet"), 2, { lineWidth: 1, lastValueVisible: true, title: "MFI", priceFormat: { type: "price", precision: 1, minMove: 0.1 } });
-    s.cmf = chart.addSeries(LW.HistogramSeries, { priceLineVisible: false, lastValueVisible: true, title: "CMF", priceFormat: { type: "price", precision: 3, minMove: 0.001 } }, 3);
-    s.obv = line(css("--s1"), 4, { lineWidth: 1, lastValueVisible: true, title: "OBV", priceFormat: { type: "volume" } });
-    const panes = chart.panes();
-    [340, 80, 70, 70, 70].forEach((h, i) => panes[i] && panes[i].setHeight(h));
-    T[tf].chart = chart; T[tf].s = s; T[tf].lines = []; T[tf].extra = [];
+    if (panes.rsi) {
+      const fixed = () => ({ priceRange: { minValue: 0, maxValue: 100 } });      // шкала RSI всегда 0–100
+      const rp = { type: "price", precision: 1, minMove: 0.1 };
+      // зоны: заливка между линией RSI и уровнем 70 (выше — перекупленность) / 30 (ниже — перепроданность)
+      s.rsiOb = chart.addSeries(LW.BaselineSeries, { baseValue: { type: "price", price: 70 }, topLineColor: "rgba(0,0,0,0)", bottomLineColor: "rgba(0,0,0,0)",
+        topFillColor1: "rgba(230,103,103,.45)", topFillColor2: "rgba(230,103,103,.15)", bottomFillColor1: "rgba(0,0,0,0)", bottomFillColor2: "rgba(0,0,0,0)",
+        lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: fixed, priceFormat: rp }, panes.rsi);
+      s.rsiOs = chart.addSeries(LW.BaselineSeries, { baseValue: { type: "price", price: 30 }, topLineColor: "rgba(0,0,0,0)", bottomLineColor: "rgba(0,0,0,0)",
+        topFillColor1: "rgba(0,0,0,0)", topFillColor2: "rgba(0,0,0,0)", bottomFillColor1: "rgba(25,158,112,.15)", bottomFillColor2: "rgba(25,158,112,.45)",
+        lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, autoscaleInfoProvider: fixed, priceFormat: rp }, panes.rsi);
+      s.rsi = line(css("--accent"), panes.rsi, { lineWidth: 2, lastValueVisible: true, title: "RSI", crosshairMarkerVisible: true,
+        autoscaleInfoProvider: fixed, priceFormat: rp });
+      s.rsi.priceScale().applyOptions({ scaleMargins: { top: 0.06, bottom: 0.06 } });   // 0–100 почти на всю высоту панели
+      s.rsi.createPriceLine({ price: 70, color: "rgba(230,103,103,.8)", lineWidth: 1, lineStyle: LW.LineStyle.Dashed, axisLabelVisible: true, title: "70" });
+      s.rsi.createPriceLine({ price: 50, color: "#4a5360", lineWidth: 1, lineStyle: LW.LineStyle.Dotted, axisLabelVisible: false, title: "" });
+      s.rsi.createPriceLine({ price: 30, color: "rgba(25,158,112,.8)", lineWidth: 1, lineStyle: LW.LineStyle.Dashed, axisLabelVisible: true, title: "30" });
+    }
+    s.hist = chart.addSeries(LW.HistogramSeries, { priceLineVisible: false, lastValueVisible: true, title: "Hist", priceFormat: p6 }, panes.macd);
+    s.macd = line(css("--s1"), panes.macd, { lineWidth: 1, lastValueVisible: true, title: "MACD", priceFormat: p6 });
+    s.sig = line(css("--s2"), panes.macd, { lineWidth: 1, lastValueVisible: true, title: "Signal", priceFormat: p6 });
+    s.mfi = line(css("--s-violet"), panes.mfi, { lineWidth: 1, lastValueVisible: true, title: "MFI", priceFormat: { type: "price", precision: 1, minMove: 0.1 } });
+    s.cmf = chart.addSeries(LW.HistogramSeries, { priceLineVisible: false, lastValueVisible: true, title: "CMF", priceFormat: { type: "price", precision: 3, minMove: 0.001 } }, panes.cmf);
+    s.obv = line(css("--s1"), panes.obv, { lineWidth: 1, lastValueVisible: true, title: "OBV", priceFormat: { type: "volume" } });
+    s.mfi.createPriceLine({ price: 80, color: "#3a434e", lineWidth: 1, lineStyle: LW.LineStyle.Dashed, axisLabelVisible: false });
+    s.mfi.createPriceLine({ price: 20, color: "#3a434e", lineWidth: 1, lineStyle: LW.LineStyle.Dashed, axisLabelVisible: false });
+    s.cmf.createPriceLine({ price: 0, color: "#3a434e", lineWidth: 1, axisLabelVisible: false });
+    T[tf].chart = chart; T[tf].s = s; T[tf].lines = []; T[tf].extra = []; T[tf].panes = panes;
+    window.__lab = T;   // для автоматических UI-проверок (только чтение)
     T[tf].markers = LW.createSeriesMarkers(s.candle, []);
     chart.subscribeCrosshairMove((p) => onCrosshair(tf, p));
+    sizePanes(tf);
+    if (!T[tf].ro) {
+      T[tf].ro = new ResizeObserver(() => sizePanes(tf));
+      T[tf].ro.observe(el);
+    }
+  }
+
+  function sizePanes(tf) {
+    const t = T[tf], el = $(tf, "chart");
+    if (!t.chart) return;
+    const panes = t.chart.panes(), n = panes.length - 1;
+    const H = Math.max(el.clientHeight - 30, 300);                     // минус ось времени
+    const w = (i) => (i === t.panes.rsi ? 1.6 : 1);                    // RSI выше остальных: зоны 30/70 должны читаться
+    const units = Array.from({ length: n }, (_, k) => w(k + 1)).reduce((x, y) => x + y, 0);
+    const osc = Math.max(44, Math.min(90, Math.floor(H * 0.52 / Math.max(units, 1))));
+    // пропорции (а не абсолютные высоты): setHeight перераспределяет высоту соседней панели, stretch factor — нет
+    panes.forEach((p, i) => p.setStretchFactor(i === 0 ? Math.max(160, H - osc * units) : osc * w(i)));
+    requestAnimationFrame(() => placeLabels(tf));
+  }
+
+  function placeLabels(tf) {
+    const t = T[tf], el = $(tf, "chart");
+    el.querySelectorAll(".pane-label").forEach((x) => x.remove());
+    let y = 0;
+    t.chart.panes().forEach((p, i) => {
+      if (i > 0) {
+        const key = Object.keys(t.panes).find((k) => t.panes[k] === i);
+        const d = document.createElement("div");
+        d.className = "pane-label";
+        d.style.top = `${y + 2}px`;
+        d.textContent = OSC_LABEL[key] || "";
+        el.appendChild(d);
+      }
+      y += p.getHeight() + 1;
+    });
+  }
+
+  function rebuildChart(tf) {
+    const t = T[tf];
+    const range = t.chart?.timeScale().getVisibleLogicalRange();
+    t.chart?.remove();
+    buildChart(tf);
+    if (t.data) {
+      t.ranged = t.data.mode;                                          // масштаб пользователя сохраняется
+      setData(tf, t.data);
+      applyOverlays(tf);
+      onCrosshair(tf, null);
+      if (range) t.chart.timeScale().setVisibleLogicalRange(range);
+    }
   }
 
   function setData(tf, d) {
     const { s } = T[tf];
-    const S = d.series;
+    // живых свечей может ещё не быть (бот загружает историю) — отсутствующие ряды отображаются пустыми
+    const S = new Proxy(d.series || {}, { get: (o, k) => o[k] || [] });
     const cs = d.candles.map((k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close }));
     const fm = d.forming;
     if (fm && (!cs.length || fm.ts > cs.at(-1).time)) // формирующаяся свеча: только отображение, в сигналах не участвует
@@ -114,11 +193,8 @@
     s.macd.setData(S.macd); s.sig.setData(S.macd_signal); s.mfi.setData(S.mfi);
     s.cmf.setData(S.cmf.map((p) => ({ ...p, color: p.value >= 0 ? "rgba(25,158,112,.75)" : "rgba(230,103,103,.75)" })));
     s.obv.setData(S.obv);
-    if (!T[tf].guides) {
-      s.mfi.createPriceLine({ price: 80, color: "#3a434e", lineWidth: 1, lineStyle: LW.LineStyle.Dashed, axisLabelVisible: false });
-      s.mfi.createPriceLine({ price: 20, color: "#3a434e", lineWidth: 1, lineStyle: LW.LineStyle.Dashed, axisLabelVisible: false });
-      s.cmf.createPriceLine({ price: 0, color: "#3a434e", lineWidth: 1, axisLabelVisible: false });
-      T[tf].guides = true;
+    if (s.rsi) {                                   // RSI(14) — ряд ядра без пересчёта
+      s.rsi.setData(S.rsi); s.rsiOb.setData(S.rsi); s.rsiOs.setData(S.rsi);
     }
     T[tf].byTime = new Map(d.candles.map((k) => [k.time, k]));
     T[tf].ind = Object.fromEntries(Object.entries(S).map(([n, arr]) => [n, new Map(arr.map((p) => [p.time, p.value]))]));
@@ -168,7 +244,8 @@
         t.extra.push(x);
       };
       mk(0, dv.p1.price, dv.p2.price);
-      if (PANES[dv.indicator] != null) mk(PANES[dv.indicator], dv.p1.ind, dv.p2.ind);
+      const pk = t.panes[DIV_PANE[dv.indicator]];
+      if (pk != null) mk(pk, dv.p1.ind, dv.p2.ind);
     });
     const marks = [];
     if (on("trades")) (tr?.ops || []).forEach((o) => marks.push(o.side === "BUY"
@@ -178,6 +255,13 @@
       color: css("--s-violet"), shape: "circle", size: 0.6, text: e.type.replace("_UP", "↑").replace("_DOWN", "↓") }));
     marks.sort((a, b) => a.time - b.time);
     t.markers.setMarkers(marks);
+  }
+
+  const num6 = (x) => (x == null ? "—" : (x >= 0 ? "+" : "−") + Math.abs(x).toFixed(6));
+  function rsiTxt(r) {
+    if (r == null) return "RSI —";
+    const z = r >= 70 ? ' <span class="neg">перекупленность</span>' : r <= 30 ? ' <span class="pos">перепроданность</span>' : "";
+    return `<span style="color:var(--accent)">RSI ${fmt.num(r, 1)}</span>${z}`;
   }
 
   function onCrosshair(tf, p) {
@@ -190,7 +274,9 @@
       const g = (n) => t.ind?.[n]?.get(c.time);
       leg.innerHTML = `${fmt.time(c.time)}  O ${fmt.price(c.open)}  H ${fmt.price(c.high)}  L ${fmt.price(c.low)}  C <span class="${c.close >= c.open ? "pos" : "neg"}">${fmt.price(c.close)}</span>
         V ${fmt.big(c.volume)}  ·  <span style="color:var(--s1)">EMA ${fmt.price(g("ema_fast"))}</span> <span style="color:var(--s2)">${fmt.price(g("ema_slow"))}</span>
-        · RSI ${fmt.num(g("rsi"), 1)} · MFI ${fmt.num(g("mfi"), 1)} · CMF ${fmt.num(g("cmf"), 3)}`;
+        <br>${rsiTxt(g("rsi"))} · MACD ${num6(g("macd"))} · Signal ${num6(g("macd_signal"))} · Hist ${num6(g("macd_hist"))}
+        · MFI ${fmt.num(g("mfi"), 1)} · CMF ${fmt.num(g("cmf"), 3)} · OBV ${fmt.num(g("obv"), 0)}`;
+      placeLabels(tf);
     }
     const ops = tm != null ? (t.data?.trader?.ops || []).filter((o) => o.ts === tm) : [];
     if (!ops.length || !p.point) { tip.style.display = "none"; return; }

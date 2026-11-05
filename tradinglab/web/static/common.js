@@ -82,7 +82,8 @@ const Lab = (() => {
         kpi("FABLES live (USDG)", q ? fmt.price(q.mid) : "—", q ? `<span class="${fresh ? "" : "neg"}">${esc(age(live.quote_age))}</span> · ${esc((q.source || "").split(" ")[0])}` : "котировок нет", fresh ? "" : "neg"),
         kpi("FABLES / USD", ds ? fmt.price(ds.price_usd) : "—", ds ? `DexScreener ${age(live.ds_age)}` : ""),
         kpi("Ликвидность", fmt.big(ds?.liquidity_usd), `объём 24ч ${fmt.big(ds?.volume?.h24)}`),
-        kpi("Котировка", live.risk?.quote_valid ? "ПРОВЕРЕНА" : q ? "НЕ ПРОВЕРЕНА" : "НЕТ", esc((live.risk?.issues || []).join("; ") || (live.risk?.entry_blockers || []).join("; ") || "источники согласованы"),
+        kpi("Котировка", live.risk?.quote_valid ? "ПРОВЕРЕНА" : q ? "НЕ ПРОВЕРЕНА" : "НЕТ", esc(!q ? (w.alive ? "ожидание первой котировки" : "бот не запущен — котировок нет") :
+            (live.risk?.issues || []).join("; ") || (live.risk?.entry_blockers || []).join("; ") || "источники согласованы"),
             live.risk?.quote_valid ? "pos" : "neg"),
         kpi("Капитал (старт)", fmt.usd(ft?.initial_total ?? 3000, 0), "3 × $1 000"),
         kpi("Стоимость портфелей", ft?.total_equity != null ? fmt.usd(ft.total_equity) : "—", ft?.mark_ts ? `оценка @ ${fmt.time(ft.mark_ts)}` : esc(ft?.note || "FORWARD не запущен")),
