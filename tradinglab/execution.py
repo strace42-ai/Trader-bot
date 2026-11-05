@@ -8,7 +8,7 @@ Slippage — дополнительное ухудшение цены проти
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from decimal import ROUND_DOWN, Decimal, getcontext
 
 getcontext().prec = 40
@@ -69,6 +69,10 @@ class Fill:
     impact_usd: Decimal
     slippage_usd: Decimal
     gas_usd: Decimal
+    model: str = "conservative-v1"     # модель расчёта исполнения (оценка, не подтверждённый своп)
+    fee_ppm: int | None = None         # применённая комиссия hook
+    fee_source: str = "начальная выборка 2026-11-05"
+    note: str = ""
 
     @property
     def cost_usd(self) -> Decimal:
@@ -118,6 +122,25 @@ def liquidation_value(qty, mid, m: CostModel) -> Decimal:
         return ZERO
     f = quote_sell(qty, mid, m)
     return f.usd - f.gas_usd
+
+
+class ConservativeExecutor:
+    """Исполнение по консервативной модели издержек (backtest и резерв для forward)."""
+
+    def __init__(self, cost: CostModel):
+        self.cost = cost
+        self.name = cost.name
+
+    def buy(self, usd_in, mid, extra_slip: Decimal = ZERO) -> Fill:
+        f = quote_buy(usd_in, mid, self.cost, extra_slip)
+        return replace(f, model=self.cost.name, fee_ppm=int(self.cost.buy_fee * 1_000_000))
+
+    def sell(self, qty, mid, extra_slip: Decimal = ZERO) -> Fill:
+        f = quote_sell(qty, mid, self.cost, extra_slip)
+        return replace(f, model=self.cost.name, fee_ppm=int(self.cost.sell_fee * 1_000_000))
+
+    def liquidation(self, qty, mid) -> Decimal:
+        return liquidation_value(qty, mid, self.cost)
 
 
 def max_trade_usd(m: CostModel) -> Decimal:

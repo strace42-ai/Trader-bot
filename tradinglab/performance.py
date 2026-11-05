@@ -46,7 +46,7 @@ def summarize(trader, bh_curve: list[dict] | None = None, bar_sec: int = 3600, m
     if mark is not None:
         if last and mark["ts"] < last["ts"]:
             raise ValueError("котировка оценки старше последней обработанной свечи трейдера")
-        liq = liquidation_value(p.qty, mark["mid"], trader.cost)
+        liq = trader.ex.liquidation(p.qty, mark["mid"]) if hasattr(trader, "ex") else liquidation_value(p.qty, mark["mid"], trader.cost)
         final = float(p.cash + liq)
         eq = eq + [final]
     else:

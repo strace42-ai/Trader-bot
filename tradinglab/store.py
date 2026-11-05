@@ -14,7 +14,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Контролируемые миграции: версия → операторы. Применяются по порядку в одной транзакции, версия записывается в meta.
 MIGRATIONS = {
     2: [  # журнал команд управления FORWARD (START/PAUSE/RESUME/STOP), только добавление
@@ -23,6 +23,30 @@ MIGRATIONS = {
              from_status TEXT, to_status TEXT NOT NULL, note TEXT)""",
         "CREATE TRIGGER IF NOT EXISTS ro_controls_update BEFORE UPDATE ON controls BEGIN SELECT RAISE(ABORT, 'controls: журнал только для добавления'); END",
         "CREATE TRIGGER IF NOT EXISTS ro_controls_delete BEFORE DELETE ON controls BEGIN SELECT RAISE(ABORT, 'controls: журнал только для добавления'); END",
+    ],
+    3: [  # живые рыночные данные FORWARD (этап E)
+        """CREATE TABLE IF NOT EXISTS live_candles (tf TEXT NOT NULL, ts INTEGER NOT NULL, o REAL, h REAL, l REAL, c REAL, v REAL,
+             source TEXT NOT NULL, close_ts INTEGER NOT NULL, available_at INTEGER NOT NULL, backfill INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY(tf, ts))""",
+        "CREATE TRIGGER IF NOT EXISTS ro_live_candles_update BEFORE UPDATE ON live_candles BEGIN SELECT RAISE(ABORT, 'live_candles: закрытая свеча неизменна (правки — в candle_revisions)'); END",
+        "CREATE TRIGGER IF NOT EXISTS ro_live_candles_delete BEFORE DELETE ON live_candles BEGIN SELECT RAISE(ABORT, 'live_candles: удаление запрещено'); END",
+        """CREATE TABLE IF NOT EXISTS candle_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, tf TEXT, ts INTEGER, seen_at INTEGER,
+             o REAL, h REAL, l REAL, c REAL, v REAL)""",
+        """CREATE TABLE IF NOT EXISTS forming (tf TEXT PRIMARY KEY, ts INTEGER, o REAL, h REAL, l REAL, c REAL, v REAL, fetched_at INTEGER)""",
+        """CREATE TABLE IF NOT EXISTS quotes (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+             mid REAL, json TEXT NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS ix_quotes ON quotes(kind, ts)",
+        """CREATE TABLE IF NOT EXISTS swaps (block INTEGER NOT NULL, log_index INTEGER NOT NULL, observed_at INTEGER NOT NULL,
+             side TEXT, fee_ppm INTEGER, usdg REAL, fables REAL, tx TEXT, PRIMARY KEY(block, log_index))""",
+        """CREATE TABLE IF NOT EXISTS context (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL)""",
+        "CREATE INDEX IF NOT EXISTS ix_context ON context(kind, ts)",
+        """CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER)""",
+        """CREATE TABLE IF NOT EXISTS commands (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, command TEXT NOT NULL,
+             args TEXT, status TEXT NOT NULL DEFAULT 'PENDING', result TEXT, done_at INTEGER)""",
+        """CREATE TABLE IF NOT EXISTS fw_marks (experiment_id TEXT NOT NULL, ts INTEGER NOT NULL, json TEXT NOT NULL,
+             PRIMARY KEY(experiment_id, ts))""",
+        "CREATE TRIGGER IF NOT EXISTS ro_fw_marks_update BEFORE UPDATE ON fw_marks BEGIN SELECT RAISE(ABORT, 'fw_marks: только добавление'); END",
+        """CREATE TABLE IF NOT EXISTS data_events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL)""",
     ],
 }
 SCHEMA = """

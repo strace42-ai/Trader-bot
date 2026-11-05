@@ -15,9 +15,10 @@ from decimal import Decimal
 
 from . import risk as R
 from .analysis import Analysis
-from .execution import ZERO, CostModel, dec, liquidation_value, q_fables, quote_buy, quote_sell
+from .execution import ZERO, ConservativeExecutor, CostModel, dec, q_fables
 from .portfolio import Portfolio
 from .strategies import STRATEGIES, Ctx
+from .candles import TF_SEC
 
 
 @dataclass
@@ -50,8 +51,11 @@ class Position:
 
 
 class Trader:
-    def __init__(self, tf: str, mode: str, experiment: str, cost: CostModel, initial="1000", risk_cfg: R.RiskConfig | None = None):
+    def __init__(self, tf: str, mode: str, experiment: str, cost: CostModel, initial="1000", risk_cfg: R.RiskConfig | None = None,
+                 executor=None):
         self.tf, self.mode, self.experiment, self.cost = tf, mode, experiment, cost
+        # cost — допущения для решений стратегии и размера позиции; executor — расчёт цены исполнения
+        self.ex = executor or ConservativeExecutor(cost)
         self.strategy, self.fn = STRATEGIES[tf]
         self.rcfg = risk_cfg or R.RISK[tf]
         self.name = f"Trader {tf.upper()}"
@@ -85,10 +89,10 @@ class Trader:
         self._new = {"ops": [], "trades": [], "decisions": [], "equity": [], "events": []}
 
     def equity_at(self, mid: float) -> Decimal:
-        return self.portfolio.equity(liquidation_value(self.portfolio.qty, mid, self.cost))
+        return self.portfolio.equity(self.ex.liquidation(self.portfolio.qty, mid))
 
-    def _op(self, fid: str, ts: int, f, reason: str, signals: list, pnl: Decimal | None = None) -> None:
-        self._push("ops", {"op_id": fid, "mode": self.mode, "trader": self.tf, "ts": ts, "side": f.side, "qty": str(f.qty),
+    def _op(self, fid: str, ts: int, f, reason: str, signals: list, pnl: Decimal | None = None, meta: dict | None = None) -> None:
+        self._push("ops", {**(meta or {}), "exec_model": f.model, "fee_ppm": f.fee_ppm, "fee_source": f.fee_source, "exec_note": f.note,"op_id": fid, "mode": self.mode, "trader": self.tf, "ts": ts, "side": f.side, "qty": str(f.qty),
                            "price": str(f.exec_price), "mid": str(f.mid), "usd": str(f.usd), "fee_usd": str(f.fee_usd),
                            "impact_usd": str(f.impact_usd), "slippage_usd": str(f.slippage_usd), "gas_usd": str(f.gas_usd),
                            "slip_bps": float((f.exec_price / f.mid - 1) * 10000) * (1 if f.side == "BUY" else -1),
@@ -146,7 +150,7 @@ class Trader:
                 self._push("events", {"ts": ts, "type": "ENTRY_CANCELLED", "why": "недостаточно денег"})
                 self.state = "FLAT"
                 return
-            f = quote_buy(usd, mid, self.cost)
+            f = self.ex.buy(usd, mid)
             fid = self._id(ts, "BUY")
             pid = f"{self.experiment}:{self.tf}:P{ts}"
             self.portfolio.apply_buy(fid, f, pid, ts)
@@ -155,25 +159,32 @@ class Trader:
                                      plan["trail_ref"], p["strategy_tf"] != "1d", plan["time_stop"], p["decision_id"], mid,
                                      str(f.usd + f.gas_usd), str(risk_usd), str(f.qty), mid, mid, mid,
                                      spent=str(f.usd + f.gas_usd), costs=str(f.cost_usd))
-            self._op(fid, ts, f, p["reason"], p["signals"])
+            self._op(fid, ts, f, p["reason"], p["signals"], meta=self._timing(p, ts, mid))
             self.state = "LONG"
         else:
-            self._sell(p["frac"], mid, ts, idx, p["reason"], extra_slip=ZERO, kind=p["kind"])
+            self._sell(p["frac"], mid, ts, idx, p["reason"], extra_slip=ZERO, kind=p["kind"], meta=self._timing(p, ts, mid))
 
-    def _sell(self, frac: float, mid: float, ts: int, idx: int, reason: str, extra_slip: Decimal, kind: str) -> None:
+    @staticmethod
+    def _timing(p: dict, ts: int, mid: float) -> dict:
+        """Время сигнала, получения, решения и исполнения + ожидаемая цена (для аудита задержек)."""
+        return {"signal_ts": p.get("signal_ts"), "received_ts": p.get("received_ts"), "decided_ts": p.get("decided_ts"),
+                "exec_ts": ts, "expected_price": p.get("expected_price"), "quote_source": p.get("quote_source")}
+
+    def _sell(self, frac: float, mid: float, ts: int, idx: int, reason: str, extra_slip: Decimal, kind: str,
+              meta: dict | None = None) -> None:
         pos = self.position
         have = self.portfolio.qty
         qty = have if frac >= 1 else min(have, q_fables(dec(pos.qty_initial) * dec(str(frac))))
         if qty <= 0:
             return
-        f = quote_sell(qty, mid, self.cost, extra_slip)
+        f = self.ex.sell(qty, mid, extra_slip)
         fid = self._id(ts, kind)
         _, pnl = self.portfolio.apply_sell(fid, f, pos.position_id)
         pos.gross = str(dec(pos.gross) + qty * (dec(mid) - dec(pos.entry_mid)))
         pos.got = str(dec(pos.got) + f.usd - f.gas_usd)
         pos.costs = str(dec(pos.costs) + f.cost_usd)
         pos.exits.append({"ts": ts, "qty": str(qty), "mid": mid, "price": str(f.exec_price), "pnl": str(pnl), "reason": reason})
-        self._op(fid, ts, f, reason, [], pnl)
+        self._op(fid, ts, f, reason, [], pnl, meta=meta)
         if self.portfolio.qty <= 0:
             self._close_trade(ts, idx, reason)
         self.state = "LONG" if self.position else "FLAT"
@@ -271,7 +282,8 @@ class Trader:
                 sell = 1 - float(self.cost.sell_fee + self.cost.slippage + self.cost.stop_slippage)
                 usd, binding = R.position_size(self.rcfg, self.cost, eq, self.portfolio.cash,
                                                dec(plan["entry_ref"] * buy), dec(plan["stop"] * sell))
-                checks.append({"name": "Размер позиции", "ok": usd > 0, "detail": f"${usd:.2f} (ограничение: {binding})"})
+                checks.append({"name": "Размер позиции", "ok": usd > 0, "detail": f"${usd:.2f} (ограничение: {binding})",
+                               "value": f"${usd:.2f}", "req": f"≥ ${self.rcfg.min_trade_usd}", "result": "PASS" if usd > 0 else "FAIL"})
                 if all(c["ok"] for c in checks):
                     self.pending = {"kind": "ENTER", "plan": plan, "usd": str(usd), "decision_id": d["decision_id"],
                                     "reason": "; ".join(d["for"]), "signals": d["for"], "strategy_tf": self.tf}
@@ -296,7 +308,7 @@ class Trader:
             self.state = "EXIT_PENDING"
         d["state"] = self.state
         self._push("decisions", d)
-        liq = liquidation_value(self.portfolio.qty, k.c, self.cost)
+        liq = self.ex.liquidation(self.portfolio.qty, k.c)
         self._push("equity", {"ts": d["decided_at"], "trader": self.tf, "mode": self.mode, "equity": str(self.portfolio.equity(liq)),
                               "cash": str(self.portfolio.cash), "qty": str(self.portfolio.qty), "mid": k.c, "liq_value": str(liq)})
         return d
@@ -314,6 +326,64 @@ class Trader:
         d = self.on_close(a, i, htf, j, market=market, fund=fund, global_kill=global_kill)
         self.last_bar_ts = k.ts
         return d
+
+    # ------------------------------------------------------------------ FORWARD: свеча и котировка раздельно
+    def on_live_bar(self, a: Analysis, i: int, htf: Analysis | None, j: int | None, *, received_ts: int, decided_ts: int,
+                    market=None, fund=None, global_kill: bool = False) -> dict | None:
+        """Закрытая свеча в FORWARD: только анализ и решение. Ничего не исполняется по ценам свечи —
+        отложенный ордер исполнит Risk Monitor по первой проверенной котировке ПОСЛЕ decided_ts."""
+        k = a.s.candles[i]
+        if k.ts <= self.last_bar_ts:
+            return None
+        if self.position:  # статистика MFE/MAE по фактическому диапазону свечи (не для исполнения)
+            if k.ts >= self.position.entry_ts - TF_SEC[self.tf]:
+                self.position.max_high, self.position.min_low = max(self.position.max_high, k.h), min(self.position.min_low, k.l)
+        d = self.on_close(a, i, htf, j, market=market, fund=fund, global_kill=global_kill)
+        d["received_ts"], d["decided_ts"] = received_ts, decided_ts
+        if self.pending:
+            self.pending.setdefault("signal_ts", d["decided_at"])
+            self.pending.setdefault("received_ts", received_ts)
+            self.pending.setdefault("decided_ts", decided_ts)
+            self.pending.setdefault("expected_price", k.c)
+        self.last_bar_ts = k.ts
+        return d
+
+    def skip_bar(self, a: Analysis, i: int, reason: str, decided_ts: int) -> dict | None:
+        """Свеча стала доступна слишком поздно (бот не работал): решение не принимается, сделок задним числом нет."""
+        k = a.s.candles[i]
+        if k.ts <= self.last_bar_ts:
+            return None
+        if self.pending and self.pending["kind"] == "ENTER":
+            self._push("events", {"ts": decided_ts, "type": "ENTRY_CANCELLED", "why": "вход устарел: " + reason, "policy": "stale"})
+            self.pending = None
+        d = {"strategy": self.strategy["id"], "version": self.strategy["version"], "tf": self.tf, "bar_ts": k.ts,
+             "decided_at": k.close_time(self.tf), "decided_ts": decided_ts, "action": "SKIPPED", "action_final": "SKIPPED",
+             "state": self.state, "conditions": [{"name": "Свеча получена вовремя", "ok": False, "detail": reason,
+                                                  "value": reason, "req": "в пределах окна актуальности"}],
+             "plan": None, "for": [], "against": ["Свеча получена вовремя"], "next": "следующая закрытая свеча",
+             "inputs": {}, "explanation": f"Решение: SKIPPED\n✗ {reason}\nСделки по историческим ценам не совершаются.",
+             "decision_id": self._id(k.ts, "D"), "mode": self.mode, "trader": self.tf, "notes": []}
+        self._push("decisions", d)
+        self.last_bar_ts = k.ts
+        return d
+
+    def on_quote(self, mid: float, ts: int, idx: int, *, price_ok: bool, data_ok: bool = True, global_kill: bool = False,
+                 quote_source: str = "") -> None:
+        """Проверенная котировка: исполнение отложенного ордера и защитные стопы/цели (независимо от таймфрейма)."""
+        if self.pending is not None:
+            self.pending["quote_source"] = quote_source
+            self.execute_pending(mid, ts, idx, data_ok=data_ok, global_kill=global_kill, price_ok=price_ok)
+        if self.position is not None:
+            self.intrabar(mid, mid, mid, ts, idx, price_ok=price_ok)
+
+    def request_close(self, ts: int, reason: str) -> bool:
+        """Ручное закрытие позиции: выход по первой проверенной котировке (не мгновенное «успешное» закрытие)."""
+        if self.position is None:
+            return False
+        self.pending = {"kind": "EXIT", "frac": 1.0, "reason": reason, "decision_id": self._id(ts, "MANUAL"),
+                        "signal_ts": ts, "received_ts": ts, "decided_ts": ts}
+        self.state = "EXIT_PENDING"
+        return True
 
     # ------------------------------------------------------------------ сохранение состояния
     def to_state(self) -> dict:

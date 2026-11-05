@@ -114,15 +114,20 @@ def entry_checks(rs: RiskState, cfg: RiskConfig, equity: Decimal, idx: int, rr: 
                  global_kill: bool = False) -> list[dict]:
     """Список проверок; вход разрешён, если все ok."""
     period_loss = (rs.period_start_equity - equity) / rs.period_start_equity if rs.period_start_equity > 0 else ZERO
+    def chk(name, ok, detail, value, req):
+        return {"name": name, "ok": ok, "detail": detail, "value": value, "req": req, "result": "PASS" if ok else "FAIL"}
+    cool = idx <= rs.cooldown_until_idx
     return [
-        {"name": "Global kill switch", "ok": not global_kill, "detail": "система остановлена" if global_kill else "выключен"},
-        {"name": "Kill switch портфеля", "ok": not rs.killed, "detail": rs.kill_reason or "не сработал"},
-        {"name": "Лимит убытка периода", "ok": period_loss < cfg.period_loss_limit,
-         "detail": f"убыток периода {period_loss * 100:.2f}% (лимит {cfg.period_loss_limit * 100:.1f}%)"},
-        {"name": "Cooldown", "ok": idx > rs.cooldown_until_idx,
-         "detail": f"до бара {rs.cooldown_until_idx}: {rs.cooldown_reason}" if idx <= rs.cooldown_until_idx else "нет"},
-        {"name": f"Чистый R:R ≥ {cfg.min_rr}", "ok": rr is not None and rr >= cfg.min_rr,
-         "detail": "не рассчитан" if rr is None else f"{rr:.2f}"},
+        chk("Global kill switch", not global_kill, "система остановлена" if global_kill else "выключен",
+            "включён" if global_kill else "выключен", "выключен"),
+        chk("Kill switch портфеля", not rs.killed, rs.kill_reason or "не сработал", "сработал" if rs.killed else "нет", "не сработал"),
+        chk("Лимит убытка периода", period_loss < cfg.period_loss_limit,
+            f"убыток периода {period_loss * 100:.2f}% (лимит {cfg.period_loss_limit * 100:.1f}%)",
+            f"{period_loss * 100:.2f}%", f"< {cfg.period_loss_limit * 100:.1f}%"),
+        chk("Cooldown", not cool, f"до бара {rs.cooldown_until_idx}: {rs.cooldown_reason}" if cool else "нет",
+            rs.cooldown_reason if cool else "нет", "нет активного cooldown"),
+        chk(f"Чистый R:R ≥ {cfg.min_rr}", rr is not None and rr >= cfg.min_rr, "не рассчитан" if rr is None else f"{rr:.2f}",
+            "н/д" if rr is None else f"{rr:.2f}", f"≥ {cfg.min_rr}"),
     ]
 
 
