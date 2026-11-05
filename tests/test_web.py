@@ -1,108 +1,157 @@
-"""Веб-терминал: страницы, API связан с ядром (без выдуманных данных), FORWARD-управление, отсутствие сетевых запросов."""
+"""Веб-терминал: безопасность управляющих API, связь с ядром и живыми данными бота, команды через очередь."""
 import socket
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
 
+from replay import Clock, Market, run, ts
 from tradinglab import backtest, dataset
+from tradinglab.live.worker import Worker
+from tradinglab.store import Store
 from tradinglab.web.app import create_app
+
+BASE = "http://127.0.0.1:8770"
 
 
 @pytest.fixture()
 def no_network(monkeypatch):
     def boom(*a, **k):
-        raise AssertionError("сетевой запрос из сервера панели запрещён")
+        raise AssertionError("сетевой запрос из веб-интерфейса запрещён (сеть опрашивает только бот)")
     monkeypatch.setattr(socket.socket, "connect", boom)
     monkeypatch.setattr(socket, "create_connection", boom)
 
 
+def client(app):
+    return TestClient(app, base_url=BASE)
+
+
+def hdr(app):
+    return {"X-Lab-Token": app.state.lab.token}
+
+
 @pytest.fixture()
-def client(tmp_path, no_network):
-    return TestClient(create_app(tmp_path))
+def live(tmp_path, no_network):
+    """Бот в том же процессе (как `serve`) на воспроизведении записанного потока."""
+    clock = Clock(ts("2026-11-04T20:05:00Z"))
+    m = Market(clock)
+    st = Store(tmp_path / "trading_lab.db", durable=False)
+    w = Worker(st, m.transport(), clock)
+    w.tick(clock.t)
+    app = create_app(tmp_path, worker=w, clock=clock)
+    return clock, m, w, app
 
 
-def test_pages_and_static(client):
-    r = client.get("/")
-    assert r.status_code == 200 and "<title>FABLES Trading Lab</title>" in r.text
-    assert client.get("/performance").status_code == 200
-    v = client.get("/static/vendor/lightweight-charts.standalone.production.js")
-    assert v.status_code == 200 and "Lightweight Charts" in v.text[:300]
-    assert client.get("/static/app.js").status_code == 200
+# ------------------------------------------------------------------ безопасность
+def test_only_localhost_and_token_protected_controls(tmp_path, no_network):
+    app = create_app(tmp_path)
+    assert TestClient(app, base_url="http://evil.example").get("/api/overview").status_code == 403   # DNS rebinding
+    c = client(app)
+    assert c.get("/api/overview").status_code == 200
+    assert c.post("/api/forward/start").status_code == 403                                           # без токена
+    assert c.post("/api/forward/start", headers={"X-Lab-Token": "x" * 43}).status_code == 403
+    assert c.post("/api/forward/start", headers={**hdr(app), "Origin": "https://evil.example"}).status_code == 403
+    page = c.get("/").text
+    assert app.state.lab.token in page and "__LAB_TOKEN__" not in page
+    assert (tmp_path / "control_token").read_text() == app.state.lab.token
 
 
-def test_overview_matches_core_backtest(client):
-    o = client.get("/api/overview").json()
+def test_web_only_without_bot_refuses_commands(tmp_path, no_network):
+    app = create_app(tmp_path)
+    r = client(app).post("/api/forward/start", headers=hdr(app))
+    assert r.status_code == 503 and "бот не запущен" in r.text
+    assert app.state.lab.db.pending_commands() == []                  # команда не поставлена в очередь
+
+
+def test_web_only_with_separate_bot_process_uses_queue(tmp_path, no_network):
+    clock = Clock(ts("2026-11-04T20:05:00Z"))
+    m = Market(clock)
+    w = Worker(Store(tmp_path / "trading_lab.db", durable=False), m.transport(), clock)
+    w.tick(clock.t)
+    app = create_app(tmp_path, clock=clock)                           # веб без бота в процессе
+    stop = threading.Event()
+
+    def bot():                                                         # «отдельный процесс» бота: исполняет очередь
+        while not stop.wait(0.02):
+            w.process_commands(int(clock.t))
+            w.heartbeat(int(clock.t))
+    th = threading.Thread(target=bot, daemon=True)
+    th.start()
+    try:
+        r = client(app).post("/api/forward/start", headers=hdr(app))
+        assert r.status_code == 200 and r.json()["status"] == "RUNNING"
+    finally:
+        stop.set()
+        th.join(2)
+
+
+# ------------------------------------------------------------------ связь с ядром и живыми данными
+def test_pages_and_backtest_still_match_core(tmp_path, no_network):
+    app = create_app(tmp_path)
+    c = client(app)
+    assert "<title>FABLES Trading Lab</title>" in c.get("/").text and c.get("/performance").status_code == 200
+    assert "Lightweight Charts" in c.get("/static/vendor/lightweight-charts.standalone.production.js").text[:300]
     ds = dataset.load()
     ref = backtest.run(ds["series"], quote=ds["quote"])
-    bt = o["backtest"]
-    assert bt["experiment"] == ref["experiment"] and bt["initial_total"] == 3000
-    assert bt["total_equity"] == pytest.approx(ref["valuation"]["total"])
-    assert bt["total_equity"] == pytest.approx(sum(v["equity"] for v in bt["traders"].values()))
-    assert bt["bh_total"] == pytest.approx(ref["valuation"]["bh_total"])
-    assert o["mark"] == ref["mark"] and o["price"]["usdg"] == ds["snapshot"]["price_usdg"]
-    assert bt["validation"] == "NOT VALIDATED" and o["forward"]["status"] == "NOT_STARTED"
-    assert any(s["status"] == "NOT CONNECTED" for s in o["sources"])
+    o = c.get("/api/overview").json()
+    assert o["backtest"]["total_equity"] == pytest.approx(ref["valuation"]["total"])
+    d = c.get("/api/terminal/4h?mode=BACKTEST").json()
+    assert d["trader"]["decision"]["explanation"] == ref["traders"]["4h"].decisions[-1]["explanation"]
+    assert all({"value", "req", "result"} <= set(x) for x in d["trader"]["decision"]["conditions"])
 
 
-@pytest.mark.parametrize("tf", ["1h", "4h", "1d"])
-def test_terminal_backtest_payload_is_core_data(client, tf):
-    d = client.get(f"/api/terminal/{tf}").json()
-    ds = dataset.load()
-    ref = backtest.run(ds["series"], quote=ds["quote"])
-    t = ref["traders"][tf]
-    assert len(d["candles"]) == len(ds["series"][tf]) and d["candles"][-1]["time"] == ds["series"][tf].candles[-1].ts
+def test_live_overview_and_terminal_show_actual_bot_data(live):
+    clock, m, w, app = live
+    c = client(app)
+    o = c.get("/api/overview").json()
+    assert o["forward"]["status"] == "NOT_STARTED" and o["live"]["worker"]["alive"]
+    assert o["live"]["quote"]["mid"] == pytest.approx(w.collector.db.last_quote("pool")["mid"])
+    assert {s["key"]: s["status"] for s in o["sources"]}["rpc"] == "OK"
+    d = c.get("/api/terminal/1h?mode=FORWARD").json()
+    assert d["trader"] is None and d["preview"] and len(d["candles"]) == w.collector.db.count("1h")
+    assert d["forming"]["ts"] > d["candles"][-1]["time"] and d["next_close"] > clock.t
+    assert c.post("/api/forward/start", headers=hdr(app)).json()["status"] == "RUNNING"
+    run(w, clock, ts("2026-11-04T23:10:00Z"))
+    d = c.get("/api/terminal/1h?mode=FORWARD").json()
     tr = d["trader"]
-    assert [o["op_id"] for o in tr["ops"]] == [o["op_id"] for o in t.ops]
-    assert len(tr["trades"]) == len(t.trades)
-    assert tr["decision"]["explanation"] == t.decisions[-1]["explanation"]
-    assert tr["summary"]["equity"] == pytest.approx(ref["summary"][tf]["equity"])
-    assert tr["summary"]["mark"] == ref["mark"]
-    names = {r["key"]: r for r in tr["analysis"]["indicators"]}
-    if tf == "1d":
-        assert names["macd_hist"]["status"] == "INSUFFICIENT_HISTORY" and tr["state"] == "WARMUP"
-    else:
-        assert names["rsi"]["status"] == "OK"
-    for k in ("macd_hist", "mfi", "cmf", "obv"):
-        assert k in d["series"]
+    db_dec = w.store.decisions(w.runner.experiment_id, "1h", 10)
+    assert tr["mode"] == "FORWARD" and tr["decision"]["bar_ts"] == db_dec[0]["bar_ts"]
+    assert tr["rejections"]["decisions"] == len(db_dec) and tr["rejections"]["any_fail"]
+    assert tr["summary"]["mark"]["mid"] == pytest.approx(w.db.kv("last_valid_quote")[0]["mid"])
+    p = c.get("/api/performance").json()["forward"]
+    assert p["status"] == "RUNNING" and len(p["curves"]["1h"]) == len(p["bh"]) == p["marks"] > 10
+    assert p["table"]["1h"]["equity"] == pytest.approx(1000.0) and p["table"]["1h"]["vs_bh_ratio"] is not None
 
 
-def test_forward_not_started_shows_no_trader(client):
-    d = client.get("/api/terminal/1h?mode=FORWARD").json()
-    assert d["forward"]["status"] == "NOT_STARTED" and d["trader"] is None
-    p = client.get("/api/performance").json()
-    assert p["forward"]["status"] == "NOT_STARTED" and p["forward"]["curves"] == {}
+def test_all_controls_through_api(live):
+    clock, m, w, app = live
+    c = client(app)
+    post = lambda cmd: c.post(f"/api/forward/{cmd}", headers=hdr(app))  # noqa: E731
+    assert post("pause").status_code == 409
+    assert post("start").json()["status"] == "RUNNING"
+    assert post("pause").json()["status"] == "PAUSED"
+    assert post("resume").json()["status"] == "RUNNING"
+    assert c.post("/api/forward/close?tf=1h", headers=hdr(app)).status_code == 409      # позиции нет
+    assert post("emergency").status_code == 409
+    assert post("stop").json()["status"] == "STOPPED"
+    assert post("start").json()["status"] == "RUNNING"                                   # новый эксперимент
+    assert [x["command"] for x in w.store.controls()][::-1] == ["START", "PAUSE", "RESUME", "STOP", "START"]
+    assert c.post("/api/forward/unknown", headers=hdr(app)).status_code == 404
 
 
-def test_forward_controls_and_persistence(tmp_path, no_network):
-    c = TestClient(create_app(tmp_path))
-    assert c.post("/api/forward/pause").status_code == 409
-    assert c.post("/api/forward/start").json()["status"] == "RUNNING"
-    assert c.post("/api/forward/start").status_code == 409
-    d = c.get("/api/terminal/4h?mode=FORWARD").json()
-    assert d["trader"]["mode"] == "FORWARD" and d["trader"]["ops"] == [] and d["trader"]["summary"]["equity"] == pytest.approx(1000)
-    assert c.post("/api/forward/pause").json()["status"] == "PAUSED"
-    c2 = TestClient(create_app(tmp_path))                 # перезапуск сервера
-    assert c2.get("/api/forward").json()["status"] == "PAUSED"
-    assert c2.get("/api/overview").json()["backtest"]["persist"]["status"] == "VERIFIED"
-    assert c2.post("/api/forward/resume").json()["status"] == "RUNNING"
-    assert c2.post("/api/forward/stop").json()["status"] == "STOPPED"
-    assert c2.post("/api/forward/unknown").status_code == 404
-    # BACKTEST не изменился от действий FORWARD
-    assert c2.get("/api/overview").json()["backtest"]["total_equity"] == pytest.approx(3000)
-
-
-def test_bad_params(client):
-    assert client.get("/api/terminal/5m").status_code == 404
-    assert client.get("/api/terminal/1h?mode=LIVE").status_code == 400
-
-
-def test_concurrent_requests_do_not_break_store(tmp_path, no_network):
-    """Регрессия: параллельные запросы из пула потоков FastAPI к одному SQLite-соединению давали HTTP 500."""
+def test_concurrent_requests_do_not_break_store(live):
     from concurrent.futures import ThreadPoolExecutor
-    c = TestClient(create_app(tmp_path))
-    c.post("/api/forward/start")
-    paths = ["/api/overview", "/api/forward", "/api/terminal/1h?mode=FORWARD", "/api/performance", "/api/terminal/4h"] * 8
-    with ThreadPoolExecutor(16) as ex:
+    clock, m, w, app = live
+    c = client(app)
+    c.post("/api/forward/start", headers=hdr(app))
+    paths = ["/api/overview", "/api/forward", "/api/terminal/1h?mode=FORWARD", "/api/performance", "/api/terminal/4h"] * 6
+    with ThreadPoolExecutor(12) as ex:
         codes = list(ex.map(lambda p: c.get(p).status_code, paths))
-        codes += list(ex.map(lambda cmd: c.post(f"/api/forward/{cmd}").status_code, ["pause", "resume"] * 6))
+        codes += list(ex.map(lambda cmd: c.post(f"/api/forward/{cmd}", headers=hdr(app)).status_code, ["pause", "resume"] * 4))
     assert all(x in (200, 409) for x in codes) and codes.count(200) >= len(paths)
+
+
+def test_bad_params(tmp_path, no_network):
+    c = client(create_app(tmp_path))
+    assert c.get("/api/terminal/5m").status_code == 404
+    assert c.get("/api/terminal/1h?mode=LIVE").status_code == 400

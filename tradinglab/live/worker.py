@@ -51,10 +51,10 @@ class Worker:
         try:
             with self.lock:
                 res = self.runner.execute(command, a)
-            self.db.finish_command(cid, "DONE", {"status": res["status"]}, now)
+            self.db.finish_command(cid, "DONE", {"forward_status": res["status"]}, now)
             return {"id": cid, "status": "DONE", "result": res}
         except ControlError as e:
-            self.db.finish_command(cid, "ERROR", {"error": str(e), "status": e.status}, now)
+            self.db.finish_command(cid, "ERROR", {"error": str(e), "forward_status": e.status}, now)
             return {"id": cid, "status": "ERROR", "error": str(e)}
 
     def tick(self, now: float | None = None) -> dict:

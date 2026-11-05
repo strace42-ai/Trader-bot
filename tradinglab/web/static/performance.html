@@ -3,12 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="lab-token" content="__LAB_TOKEN__">
   <title>Performance · FABLES Trading Lab</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar" id="topbar"><div class="topbar-row"><div class="brand">FABLES Trading Lab</div><span class="muted">загрузка…</span></div></header>
   <main>
+    <section class="card">
+      <div class="panel-h"><span>FORWARD · LIVE · equity на общих timestamps синхронных оценок (одна котировка, одна модель исполнения)</span><span id="fwBadge"></span></div>
+      <div class="body">
+        <div class="legend-inline" id="fwLegend"></div>
+        <div class="perf-chart" id="fwChart" style="height:380px"></div>
+        <div id="fwBody" style="margin-top:8px"></div>
+      </div>
+    </section>
     <section class="card">
       <div class="panel-h"><span>BACKTEST · equity портфелей и Buy &amp; Hold (общий старт, та же модель издержек)</span><span class="badge warn">NOT VALIDATED</span></div>
       <div class="body">
@@ -20,10 +29,6 @@
     <section class="card">
       <div class="panel-h"><span>Сравнение: трейдеры vs Buy &amp; Hold vs кеш</span><span class="muted" id="perfMark"></span></div>
       <div class="body" id="perfTable"></div>
-    </section>
-    <section class="card">
-      <div class="panel-h"><span>FORWARD paper trading</span><span id="fwBadge"></span></div>
-      <div class="body" id="fwBody"></div>
     </section>
   </main>
   <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>

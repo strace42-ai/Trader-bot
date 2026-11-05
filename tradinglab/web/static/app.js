@@ -8,7 +8,7 @@
   const TITLES = { "1h": "TRADER 1H", "4h": "TRADER 4H", "1d": "TRADER 1D" };
   const TABS = [["overview", "Обзор"], ["ind", "Индикаторы"], ["struct", "Структура"], ["onchain", "Ончейн"], ["dec", "Решения"], ["diag", "Диагностика"]];
   const PANES = { MACD_HIST: 1, MFI: 2, CMF: 3, OBV: 4 };
-  let mode = store.get("lab.mode", "BACKTEST");
+  let mode = store.get("lab.mode", "FORWARD");
   let overview = null;
   const T = {}; // состояние терминалов
 
@@ -102,7 +102,11 @@
   function setData(tf, d) {
     const { s } = T[tf];
     const S = d.series;
-    s.candle.setData(d.candles.map((k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close })));
+    const cs = d.candles.map((k) => ({ time: k.time, open: k.open, high: k.high, low: k.low, close: k.close }));
+    const fm = d.forming;
+    if (fm && (!cs.length || fm.ts > cs.at(-1).time)) // формирующаяся свеча: только отображение, в сигналах не участвует
+      cs.push({ time: fm.ts, open: fm.o, high: fm.h, low: fm.l, close: fm.c, color: "rgba(166,174,185,.45)", wickColor: "rgba(166,174,185,.6)", borderColor: "rgba(166,174,185,.6)" });
+    s.candle.setData(cs);
     s.vol.setData(d.candles.map((k) => ({ time: k.time, value: k.volume, color: k.close >= k.open ? "rgba(25,158,112,.35)" : "rgba(230,103,103,.35)" })));
     s.emaF.setData(S.ema_fast); s.emaS.setData(S.ema_slow);
     s.bbU.setData(S.bb_upper); s.bbM.setData(S.bb_mid); s.bbL.setData(S.bb_lower);
@@ -119,6 +123,8 @@
     T[tf].byTime = new Map(d.candles.map((k) => [k.time, k]));
     T[tf].ind = Object.fromEntries(Object.entries(S).map(([n, arr]) => [n, new Map(arr.map((p) => [p.time, p.value]))]));
     // по умолчанию — период с начала торговли (день запуска с пиком первого часа только история; прокрутка доступна)
+    if (T[tf].ranged === d.mode) return;      // при автообновлении масштаб пользователя не сбрасывается
+    T[tf].ranged = d.mode;
     const start = overview?.backtest?.start_ts;
     const from = start ? d.candles.findIndex((k) => k.time >= start) : 0;
     if (from > 0) T[tf].chart.timeScale().setVisibleLogicalRange({ from, to: d.candles.length + 3 });
@@ -134,7 +140,7 @@
     s.vol.applyOptions({ visible: on("vol") });
     t.lines.forEach((l) => s.candle.removePriceLine(l)); t.lines = [];
     t.extra.forEach((x) => t.chart.removeSeries(x)); t.extra = [];
-    const tr = d.trader, st = tr?.analysis?.structure || {};
+    const tr = d.trader, st = tr?.analysis?.structure || d.preview?.structure || {};
     const pl = (price, color, title, style = LW.LineStyle.Dashed, w = 1) =>
       t.lines.push(s.candle.createPriceLine({ price, color, lineWidth: w, lineStyle: style, axisLabelVisible: true, title }));
     const lastC = d.candles.at(-1)?.close;
@@ -145,6 +151,7 @@
       ["0.382", "0.5", "0.618"].forEach((r) => pl(st.fib.retracement[r], css("--s4"), `Fib ${r}`, LW.LineStyle.Dotted));
       pl(st.fib.extension["1.618"], css("--s4"), "Ext 1.618", LW.LineStyle.Dotted);
     }
+    if (d.mode === "FORWARD" && d.quote) pl(d.quote.mid, css("--accent"), "Live", LW.LineStyle.Solid);
     const pos = tr?.position;
     if (pos) {
       pl(pos.entry_mid, css("--text-primary"), "Вход", LW.LineStyle.Solid);
@@ -208,17 +215,27 @@
     return `<div class="metric"><div class="k" title="${esc(k)}">${esc(k)}</div><div class="v ${cls}">${v}</div><div class="s">${s || "&nbsp;"}</div></div>`;
   }
 
+  function closeInfo(tf) {
+    const d = T[tf].data;
+    if (d.mode !== "FORWARD" || !d.next_close) return "";
+    const left = Math.max(0, d.next_close - Date.now() / 1000);
+    const h = Math.floor(left / 3600), m = Math.floor((left % 3600) / 60), sx = Math.floor(left % 60);
+    return `<span title="свеча обрабатывается после получения из GeckoTerminal (≈ +3 мин)">следующее закрытие ${fmt.time(d.next_close)} UTC · через <b class="mono">${h ? h + " ч " : ""}${m} мин ${sx} с</b></span>`;
+  }
+
   function renderHead(tf) {
     const d = T[tf].data, tr = d.trader;
     if (!tr) {
       $(tf, "strat").textContent = "";
       $(tf, "state").innerHTML = `<span class="badge">FORWARD: ${Lab.STATUS_RU[d.forward.status]}</span>`;
       $(tf, "sample").innerHTML = "";
-      $(tf, "asof").textContent = `рыночные данные до ${fmt.dt(d.candles.at(-1)?.time + ({ "1h": 3600, "4h": 14400, "1d": 86400 })[tf])}`;
+      $(tf, "asof").innerHTML = closeInfo(tf);
       $(tf, "metrics").innerHTML = metric("Режим", "FORWARD", "") + metric("Статус", Lab.STATUS_RU[d.forward.status]) +
-        `<div class="metric" style="grid-column: span 11"><div class="k">Пояснение</div><div class="s" style="white-space:normal">${
-          d.forward.status === "NOT_STARTED" ? "Forward paper trading не запущен. Нажмите START, чтобы создать эксперимент; сделки появятся только после подключения живых данных." :
-          esc(d.forward.feed.reason)}</div></div>`;
+        metric("Закрытых свечей", String(d.candles.length), d.candles.length ? `последняя ${fmt.time(d.candles.at(-1).time)}` : "бот ещё не загрузил") +
+        `<div class="metric" style="grid-column: span 10"><div class="k">Пояснение</div><div class="s" style="white-space:normal">${
+          !d.worker?.alive ? "Фоновый бот не запущен: живые данные не собираются. Запустите start.bat." :
+          d.forward.status === "NOT_STARTED" ? "Бот собирает живые данные. Forward paper trading не запущен — нажмите START, чтобы три трейдера начали торговать с этого момента." :
+          "Нет данных трейдера."}</div></div>`;
       return;
     }
     const sm = tr.summary;
@@ -227,8 +244,8 @@
     $(tf, "state").innerHTML = `<span class="badge ${stc}">${esc(tr.state)}</span>`;
     $(tf, "sample").innerHTML = `<span class="badge warn" title="Нужно ≥ 30 завершённых сделок для статистических выводов">${esc(sm.sample)}</span>
       <span class="badge">${esc(sm.validation)}</span>`;
-    $(tf, "asof").textContent = sm.mark ? `оценка по ${fmt.price(sm.mark.mid)} @ ${fmt.time(sm.mark.ts)} · ${sm.cost_model}`
-      : `${sm.mark_note || "котировки для оценки нет"} · ${sm.cost_model}`;
+    $(tf, "asof").innerHTML = (d.mode === "FORWARD" ? closeInfo(tf) + " · " : "") + esc(sm.mark ? `оценка по ${fmt.price(sm.mark.mid)} @ ${fmt.time(sm.mark.ts)} · ${d.mode === "FORWARD" ? (tr.diagnostics.exec_model || "") : sm.cost_model}`
+      : `${sm.mark_note || "проверенной котировки для оценки нет"}`);
     const pf = sm.profit_factor == null ? "—" : fmt.num(sm.profit_factor, 2);
     $(tf, "metrics").innerHTML = [
       metric("Equity", fmt.usd(sm.equity), `старт ${fmt.usd(sm.initial, 0)}`),
@@ -266,8 +283,11 @@
     } else {
       h += `<div class="sec">Нет открытой позиции.</div>`;
     }
-    if (pend) h += `<div class="warnline" style="margin-top:6px">Отложенный ордер: ${esc(pend.kind)} — исполнится по следующей доступной цене. ${esc(pend.reason || "")}</div>`;
+    if (pend) h += `<div class="warnline" style="margin-top:6px">Отложенный ордер: ${esc(pend.kind)} — исполнится по первой проверенной котировке после решения. ${esc(pend.reason || "")}</div>`;
+    if (tr.mode === "FORWARD" && p && !(pend && pend.kind === "EXIT"))
+      h += `<div style="margin-top:8px"><button class="btn danger" data-close="${tf}">CLOSE POSITION</button></div>`;
     el.innerHTML = h;
+    el.querySelector("[data-close]")?.addEventListener("click", () => Lab.command("close", tf));
   }
 
   function renderOps(tf) {
@@ -286,9 +306,13 @@
         <div class="l1"><span class="side-b ${o.side === "BUY" ? "buy" : "sell"}">${o.side}</span> · ${fmt.price(Number(o.price))} · ${fmt.qty(Number(o.qty))} FABLES · ${fmt.usd(Number(o.usd))}</div>
         <div class="l2">Причина: ${esc(o.reason)}</div>
         <div class="l3">${fmt.dt(o.ts)} · издержки ${fmt.usd(Number(o.fee_usd) + Number(o.impact_usd) + Number(o.slippage_usd) + Number(o.gas_usd), 3)}
-          ${o.realized_pnl != null ? ` · PnL <span class="${fmt.cls(Number(o.realized_pnl))}">${fmt.sUsd(Number(o.realized_pnl))}</span>` : ""} · ${esc(o.position_id)}</div></div>`).join("")
+          (fee ${fmt.usd(Number(o.fee_usd), 3)}${o.fee_ppm ? " = " + fmt.num(o.fee_ppm / 1e4, 2) + "%" : ""} · impact ${fmt.usd(Number(o.impact_usd), 4)} · slip ${fmt.usd(Number(o.slippage_usd), 3)} · gas ${fmt.usd(Number(o.gas_usd), 4)})
+          ${o.realized_pnl != null ? ` · PnL <span class="${fmt.cls(Number(o.realized_pnl))}">${fmt.sUsd(Number(o.realized_pnl))}</span>` : ""} · ${esc(o.position_id)}</div>
+        ${o.signal_ts ? `<div class="l3">сигнал ${fmt.time(o.signal_ts)} · получен ${fmt.time(o.received_ts)} · решение ${fmt.time(o.decided_ts)} · исполнение ${fmt.time(o.exec_ts)}
+          · ожидалось ${fmt.price(o.expected_price)} → mid ${fmt.price(Number(o.mid))} · ${esc(o.quote_source || "")}</div>` : ""}
+        <div class="l3">модель: ${esc(o.exec_model || o.cost_model)} — оценка, не подтверждённый своп${o.exec_note ? " · " + esc(o.exec_note) : ""}</div></div>`).join("")
       : `<div class="empty">${tr.ops.length ? "Нет операций под выбранные фильтры." : !tr.decisions.length ?
-          "Решений ещё нет: после START не закрылось ни одной новой свечи (живые данные не подключены)." :
+          "Решений ещё нет: после START ещё не закрылась ни одна новая свеча этого таймфрейма." :
           "Операций нет: стратегия не нашла входа, удовлетворяющего всем условиям и издержкам. Причины — во вкладке «Решения»."}</div>`;
     $(tf, "trcount").textContent = `${tr.trades.length}`;
     tel.innerHTML = tr.trades.length ? tr.trades.slice().reverse().map((x) => `<div class="op">
@@ -306,23 +330,46 @@
     }).join("")}</ul>`;
   }
 
+  function indTable(an) {
+    return `<table class="t"><tr><th>Индикатор</th><th>Значение</th><th>Мин. баров</th><th>Статус</th><th>Интерпретация</th></tr>
+      ${an.indicators.map((r) => `<tr><td>${esc(r.name)}</td><td class="n">${esc(r.display)}</td><td class="n">${r.min_bars ?? "—"}</td>
+        <td><span class="badge ${r.status === "OK" ? "good" : "warn"}">${esc(r.status)}</span></td><td class="sec">${esc(r.text)}</td></tr>`).join("")}</table>`;
+  }
+
+  function condTable(list, title) {
+    if (!list || !list.length) return "";
+    return `<h4 style="margin-top:10px">${esc(title)}</h4><table class="t"><tr><th>Условие</th><th>Значение</th><th>Требование</th><th>Результат</th></tr>
+      ${list.map((c) => { const r = c.result || (c.ok === true ? "PASS" : c.ok === false ? "FAIL" : "N/A");
+        return `<tr><td>${esc(c.name)}</td><td class="mono">${esc(c.value ?? c.detail ?? "")}</td><td class="mono sec">${esc(c.req ?? "")}</td>
+          <td><span class="badge ${r === "PASS" ? "good" : r === "FAIL" ? "crit" : ""}">${r}</span></td></tr>`; }).join("")}</table>`;
+  }
+
+  function rejTable(rj) {
+    if (!rj || !rj.rejected) return `<div class="sec">Отклонённых решений пока нет.</div>`;
+    const rows = (arr) => arr.slice(0, 8).map((x) => `<tr><td>${esc(x.name)}</td><td class="n">${x.count}</td><td class="n">${fmt.pct(x.pct, 1)}</td></tr>`).join("");
+    return `<div class="sec" style="margin-bottom:6px">Решений: ${rj.decisions}, без входа: ${rj.rejected} · ${Object.entries(rj.by_action).map(([k, v]) => `${esc(k)}: ${v}`).join(" · ")}</div>
+      <div class="grid2"><div><h4>Чаще всего не выполняется (любое условие)</h4><table class="t"><tr><th>Условие</th><th>Раз</th><th>% решений</th></tr>${rows(rj.any_fail)}</table></div>
+      <div><h4>Первый блокер</h4><table class="t"><tr><th>Условие</th><th>Раз</th><th>%</th></tr>${rows(rj.first_blocker)}</table>
+      ${rj.risk_fail.length ? `<h4 style="margin-top:8px">Риск-фильтры</h4><table class="t"><tr><th>Фильтр</th><th>Раз</th><th>%</th></tr>${rows(rj.risk_fail)}</table>` : ""}</div></div>`;
+  }
+
   function renderAnalysis(tf) {
     const d = T[tf].data, tr = d.trader, sec = document.querySelector(`#t-${tf}`);
     const body = (k) => sec.querySelector(`[data-body="${k}"]`);
     if (!tr) {
-      const msg = `<div class="empty">FORWARD: ${Lab.STATUS_RU[d.forward.status]}. Анализ и решения появятся после запуска и поступления новых закрытых свечей. ${esc(d.forward.feed.reason)}.</div>`;
+      const msg = `<div class="empty">FORWARD: ${Lab.STATUS_RU[d.forward.status]}. Решения трейдера появятся после START на новых закрытых свечах.
+        ${d.preview ? "Ниже — живой рыночный анализ последней закрытой свечи (не решение трейдера)." : "Живых свечей ещё нет — бот не запущен или не загрузил историю."}</div>`;
       TABS.forEach(([k]) => (body(k).innerHTML = msg));
+      if (d.preview) body("ind").innerHTML = msg + indTable(d.preview);
       body("onchain").innerHTML = onchain();
       return;
     }
     const dec = tr.decision, an = tr.analysis, st = an.structure || {};
     if (!dec) {
-      const msg = `<div class="empty">${esc(tr.mode)}: решений ещё нет — после начала эксперимента не закрылось ни одной новой свечи.
-        ${tr.mode === "FORWARD" ? "Живые данные не подключены, поэтому новые свечи не поступают." : ""}
-        Рыночные индикаторы ниже — на последней закрытой свече записанного набора.</div>`;
+      const msg = `<div class="empty">${esc(tr.mode)}: решений ещё нет — после START ещё не закрылась ни одна новая свеча этого таймфрейма
+        (${closeInfo(tf) || "ожидание закрытия"}). Рыночные индикаторы ниже — на последней закрытой живой свече; это анализ рынка, а не решение трейдера.</div>`;
       TABS.forEach(([k]) => (body(k).innerHTML = msg));
-      body("ind").innerHTML = msg + `<table class="t"><tr><th>Индикатор</th><th>Значение</th><th>Статус</th><th>Интерпретация</th></tr>
-        ${an.indicators.map((r) => `<tr><td>${esc(r.name)}</td><td class="n">${esc(r.display)}</td><td>${esc(r.status)}</td><td class="sec">${esc(r.text)}</td></tr>`).join("")}</table>`;
+      body("ind").innerHTML = msg + indTable(an);
       body("onchain").innerHTML = onchain();
       return;
     }
@@ -339,6 +386,7 @@
         <div class="decision-head"><span class="muted">Решение на закрытии ${fmt.dt(dec?.decided_at)}:</span><span class="act ${actCls}">${esc(act)}</span>
           <span class="badge">${esc(tr.state)}</span></div>
         <h4>Состояние рынка</h4><div><b>${esc(reg.regime || "—")}</b> <span class="sec">— ${esc(reg.why || "")}</span></div>
+        ${condTable(dec?.conditions, "Диагностика условий стратегии")}
         <h4 style="margin-top:10px">Аргументы за вход</h4>${conds((dec?.conditions || []).filter((c) => c.ok === true))}
         <h4 style="margin-top:10px">Аргументы против</h4>${failed.length ? conds(failed) : `<div class="sec">нет</div>`}
         ${(dec?.conditions || []).some((c) => c.ok == null) ? `<h4 style="margin-top:10px">Не проверено (нет данных)</h4>${conds(dec.conditions.filter((c) => c.ok == null))}` : ""}
@@ -352,7 +400,9 @@
         ${failed.length > 1 ? `<ul class="plain">${failed.slice(1).map((c) => `<li>должно выполниться: ${esc(c.name)}</li>`).join("")}</ul>` : ""}
         <h4 style="margin-top:10px">${tr.position ? "Текущий план позиции" : "Гипотетический план (вход не разрешён)"}</h4>
         ${plan ? `<div class="kv">${Object.entries(plan).map(([k, v]) => `<span class="k">${k}</span><span class="v">${v}</span>`).join("")}</div>` : `<div class="sec">плана нет: базовый сетап не обнаружен</div>`}
-        <h4 style="margin-top:10px">Риск-фильтры</h4>${conds(dec?.risk || tr.risk.checks)}
+        ${condTable(dec?.risk || tr.risk.checks, "Риск-фильтры")}
+        ${tr.rejections ? `<h4 style="margin-top:10px">Что чаще всего мешает входу</h4><div class="sec">${(tr.rejections.any_fail || []).slice(0, 3)
+          .map((x) => `${esc(x.name)} — ${fmt.pct(x.pct, 0)} решений`).join("<br>") || "—"}</div>` : ""}
         <h4 style="margin-top:10px">Полное объяснение решения</h4><pre class="expl">${esc(dec?.explanation || "")}</pre>
       </div></div>`;
 
@@ -383,7 +433,9 @@
     tr.decisions.forEach((x) => (counts[x.action_final] = (counts[x.action_final] || 0) + 1));
     const blk = {};
     tr.decisions.forEach((x) => x.blocker && (blk[x.blocker] = (blk[x.blocker] || 0) + 1));
-    body("dec").innerHTML = `<div class="sec" style="margin-bottom:8px">Всего решений: ${tr.decisions.length} · ${Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(" · ")}<br>
+    body("dec").innerHTML = `<h4>Статистика причин отклонённых входов</h4>${rejTable(tr.rejections || rejLocal(tr))}
+      <h4 style="margin-top:12px">История решений</h4>
+      <div class="sec" style="margin-bottom:8px">Всего решений: ${tr.decisions.length} · ${Object.entries(counts).map(([k, v]) => `${k}: ${v}`).join(" · ")}<br>
       Главные блокеры: ${Object.entries(blk).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${esc(k)} — ${v}`).join("; ") || "нет"}</div>
       <table class="t"><tr><th>Закрытие свечи</th><th>Решение</th><th>Состояние</th><th>Первый блокер</th><th>R:R</th></tr>
       ${tr.decisions.slice(0, 150).map((x, i) => `<tr class="click" data-i="${i}"><td>${fmt.dt(x.decided_at)}</td><td>${esc(x.action_final)}</td><td>${esc(x.state)}</td>
@@ -422,12 +474,15 @@
   }
 
   function onchain() {
-    const m = overview?.market, p = overview?.price;
+    const L = overview?.live;
+    const liveDs = mode === "FORWARD" && L?.ds;
+    const m = liveDs ? L.ds : overview?.market;
+    const p = liveDs ? { ts: L.ds.ts, usd: L.ds.price_usd, usdg: L.ds.mid } : overview?.price;
     if (!m) return `<div class="empty">Снимка рынка нет.</div>`;
     const tx = m.txns || {};
     const row = (k) => tx[k] ? `<tr><td>${k}</td><td class="n">${tx[k].buys}</td><td class="n">${tx[k].sells}</td><td class="n">${tx[k].buys ? fmt.num(tx[k].sells / tx[k].buys, 2) : "—"}</td></tr>` : "";
     return `<div class="grid2">
-      <div class="box"><h4>Срез пула (DexScreener, ${fmt.dt(p.ts)}) — РЕАЛЬНОЕ ИЗМЕРЕНИЕ, не история</h4><div class="kv">
+      <div class="box"><h4>Срез пула (DexScreener, ${fmt.dt(p.ts)}) — ${liveDs ? "ЖИВОЙ, " + esc(Lab.age(L.ds_age)) : "РЕАЛЬНОЕ ИЗМЕРЕНИЕ, не история"}</h4><div class="kv">
         <span class="k">Цена USD / USDG</span><span class="v">${fmt.price(p.usd)} / ${fmt.price(p.usdg)}</span>
         <span class="k">Ликвидность</span><span class="v">${fmt.big(m.liquidity_usd)}</span>
         <span class="k">FDV / Market cap</span><span class="v">${fmt.big(m.fdv)} / ${fmt.big(m.market_cap)}</span>
@@ -436,7 +491,10 @@
         <span class="k">Δ цены 1ч / 6ч / 24ч</span><span class="v">${fmt.sPct(m.price_change?.h1)} / ${fmt.sPct(m.price_change?.h6)} / ${fmt.sPct(m.price_change?.h24)}</span></div>
         <h4 style="margin-top:10px">Сделки: покупки / продажи</h4><table class="t"><tr><th>Окно</th><th>Buys</th><th>Sells</th><th>Sells/Buys</th></tr>${row("h1")}${row("h6")}${row("h24")}</table></div>
       <div class="box"><h4>Измерено ончейн (2026-11-05)</h4><ul class="plain">
-        <li>Комиссия hook: покупка 0,50%, продажа 1,00% — по 88 событиям Swap (evidence/fables_swaps)</li>
+        <li>Комиссия hook: ${liveDs && L.fees?.BUY ? `сейчас BUY ${fmt.num(L.fees.BUY / 1e4, 2)}% / SELL ${fmt.num(L.fees.SELL / 1e4, 2)}% (медиана ${L.fees.BUY_n}/${L.fees.SELL_n} последних Swap)` : "покупка 0,50%, продажа 1,00% — по 88 событиям Swap (evidence/fables_swaps)"}</li>
+        ${liveDs && L.pool ? `<li>StateView: mid ${fmt.price(L.pool.mid)} USDG, блок ${L.pool.block}, tick ${L.pool.tick}, L = ${esc(L.pool.liquidity)} (${Lab.age(L.pool_age)})</li>` : ""}
+        ${liveDs && L.gas?.usd_per_swap != null ? `<li>Газ: ${fmt.usd(L.gas.usd_per_swap, 4)} за своп (${L.gas.wei} wei × 250k, ETH ${fmt.usd(L.gas.eth_usd, 0)})</li>` : ""}
+        ${liveDs && L.context ? `<li>Контекст: BTC ${fmt.usd(L.context.BTC?.usd, 0)} (${fmt.sPct(L.context.BTC?.chg24, 1)} 24ч) · ETH ${fmt.usd(L.context.ETH?.usd, 0)} (${fmt.sPct(L.context.ETH?.chg24, 1)}) · USDG ${fmt.num(L.context.USDG?.usd, 4)}$</li>` : ""}
         <li>Основной пул = launchPoolId официального конфига; PoolKey сверен с poolId</li></ul>
         <h4 style="margin-top:10px">Недоступно (не рассчитывается и не подменяется оценками)</h4><ul class="plain">
         <li>CVD / order flow / whale activity — нет потока Swap-событий (нужен разрешённый RPC-сборщик)</li>
@@ -455,15 +513,31 @@
     onCrosshair(tf, null);
   }
 
+  function rejLocal(tr) {   // BACKTEST: та же статистика из списка решений терминала
+    const rej = tr.decisions.filter((x) => ["WAIT", "NO_TRADE", "WARMUP", "SKIPPED"].includes(x.action_final));
+    const first = {};
+    rej.forEach((x) => x.blocker && (first[x.blocker] = (first[x.blocker] || 0) + 1));
+    const by = {};
+    tr.decisions.forEach((x) => (by[x.action_final] = (by[x.action_final] || 0) + 1));
+    const arr = Object.entries(first).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count, pct: count / rej.length * 100 }));
+    return { decisions: tr.decisions.length, rejected: rej.length, by_action: by, any_fail: arr, first_blocker: arr, risk_fail: [] };
+  }
+
   function banner() {
     const b = document.getElementById("modeBanner");
     if (mode === "BACKTEST") {
       b.innerHTML = `<b>BACKTEST · NOT VALIDATED.</b> Офлайн-воспроизведение записанных закрытых свечей (${esc(overview.dataset.id)}) тем же кодом стратегий; исполнение по следующей цене,
         консервативная модель издержек. Это не forward-результат и не прогноз. Старт: ${fmt.dt(overview.backtest.start_ts)}.`;
     } else {
-      const f = overview.forward;
-      b.innerHTML = `<b>FORWARD · ${Lab.STATUS_RU[f.status]}.</b> ${f.status === "NOT_STARTED" ? "Эксперимент не запущен — данные ниже только рыночные, сделок и PnL нет." :
-        `Эксперимент ${esc(f.experiment)} начат ${fmt.dt(f.started_at)}.`} Живые данные: <b>${esc(f.feed.status)}</b> — ${esc(f.feed.reason)}.`;
+      const f = overview.forward, w = overview.live.worker, rk = overview.live.risk || {};
+      const st = { NOT_STARTED: "Эксперимент не запущен — ниже живые рыночные данные; сделок и PnL нет. Нажмите START.",
+        RUNNING: `Эксперимент ${esc(f.experiment)} идёт с ${fmt.dt(f.started_at)}: трейдеры решают на каждой закрытой свече, Risk Monitor проверяет стопы на каждой котировке.`,
+        PAUSED: `Эксперимент ${esc(f.experiment)} на паузе: новые входы запрещены, стопы и выходы защищают позиции.`,
+        STOPPED: `Эксперимент ${esc(f.experiment)} остановлен: решения не принимаются, позиции (если есть) сохранены и оцениваются по рынку.` }[f.status];
+      b.innerHTML = `<b>FORWARD · LIVE · ${Lab.STATUS_RU[f.status]}.</b> ${st} Бот: <b class="${w.alive ? "pos" : "neg"}">${w.alive ? "работает" : "не запущен"}</b>.
+        ${rk.entry_blockers?.length ? `<span class="warnline">Новые входы заблокированы: ${esc(rk.entry_blockers.join("; "))}.</span>` : ""}
+        ${rk.unprotected?.length ? `<span class="neg">Позиции ${esc(rk.unprotected.join(", ").toUpperCase())} без проверки: котировка недостоверна.</span>` : ""}
+        Исполнение — оценочная модель (CLMM активного диапазона), не подтверждённые свопы.`;
     }
   }
 
@@ -485,8 +559,12 @@
       document.getElementById("modeBanner").innerHTML = `<b>Ошибка загрузки:</b> ${esc(e.message)}`;
       console.error(e);
     }
-    document.addEventListener("lab:refresh", () => refresh(mode === "FORWARD"));
-    setInterval(() => refresh(false).catch(() => {}), 30000);
+    document.addEventListener("lab:refresh", () => refresh(true));
+    // FORWARD: живое обновление (локальный сервер; внешние источники опрашивает только бот по своему расписанию)
+    setInterval(() => refresh(mode === "FORWARD").catch(() => {}), 15000);
+    setInterval(() => TFS.forEach((tf) => { if (T[tf].data?.mode === "FORWARD") $(tf, "asof").innerHTML = T[tf].data.trader
+      ? closeInfo(tf) + " · " + esc(T[tf].data.trader.summary.mark ? `оценка по ${fmt.price(T[tf].data.trader.summary.mark.mid)} @ ${fmt.time(T[tf].data.trader.summary.mark.ts)}` : "")
+      : closeInfo(tf); }), 1000);
   }
   init();
 })();

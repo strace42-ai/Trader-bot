@@ -209,7 +209,7 @@ class Trader:
         self.position = None
 
     # ------------------------------------------------------------------ 2) внутри свечи
-    def intrabar(self, o: float, h: float, l: float, ts: int, idx: int, price_ok: bool = True) -> None:
+    def intrabar(self, o: float, h: float, l: float, ts: int, idx: int, price_ok: bool = True, quote_source: str = "") -> None:
         pos = self.position
         if not pos:
             return
@@ -219,13 +219,17 @@ class Trader:
         pos.max_high, pos.min_low = max(pos.max_high, h), min(pos.min_low, l)
         if l <= pos.stop:
             px = min(o, pos.stop)
+            meta = {"signal_ts": ts, "received_ts": ts, "decided_ts": ts, "exec_ts": ts, "expected_price": pos.stop,
+                    "quote_source": quote_source or ("свеча" if self.mode == "BACKTEST" else "")}
             self._sell(1.0, px, ts, idx, f"стоп {pos.stop:.6g} (исполнено по {px:.6g} + доп. проскальзывание)",
-                       extra_slip=self.cost.stop_slippage, kind="STOP")
+                       extra_slip=self.cost.stop_slippage, kind="STOP", meta=meta)
             return
         if pos.t1 and not pos.t1_done and h >= pos.t1:
             px = max(o, pos.t1)
             pos.t1_done = True
-            self._sell(pos.t1_frac, px, ts, idx, f"цель 1 {pos.t1:.6g}: продажа {pos.t1_frac * 100:.0f}%", extra_slip=ZERO, kind="T1")
+            meta = {"signal_ts": ts, "received_ts": ts, "decided_ts": ts, "exec_ts": ts, "expected_price": pos.t1,
+                    "quote_source": quote_source or ("свеча" if self.mode == "BACKTEST" else "")}
+            self._sell(pos.t1_frac, px, ts, idx, f"цель 1 {pos.t1:.6g}: продажа {pos.t1_frac * 100:.0f}%", extra_slip=ZERO, kind="T1", meta=meta)
 
     # ------------------------------------------------------------------ 3) закрытие свечи
     def on_close(self, a: Analysis, i: int, htf: Analysis | None, j: int | None, market=None, fund=None,
@@ -374,7 +378,7 @@ class Trader:
             self.pending["quote_source"] = quote_source
             self.execute_pending(mid, ts, idx, data_ok=data_ok, global_kill=global_kill, price_ok=price_ok)
         if self.position is not None:
-            self.intrabar(mid, mid, mid, ts, idx, price_ok=price_ok)
+            self.intrabar(mid, mid, mid, ts, idx, price_ok=price_ok, quote_source=quote_source)
 
     def request_close(self, ts: int, reason: str) -> bool:
         """Ручное закрытие позиции: выход по первой проверенной котировке (не мгновенное «успешное» закрытие)."""

@@ -70,9 +70,11 @@ class LiveExecutor:
         ideal = (usd_in - fee) / mid
         f = Fill("BUY", mid, out, usd_in, usd_in / out, fee, (ideal - y) * mid, (y - out) * mid, self.gas_usd,
                  self.name, ppm, src, f"смещение цены {ticks:.2f} тика")
-        if ticks > SAFE_TICKS and cons.qty < f.qty:
-            return replace(cons, model="clmm→conservative", fee_ppm=ppm, fee_source=src,
-                           note=f"смещение {ticks:.1f} тика > {SAFE_TICKS}: возможен выход из диапазона, взята худшая оценка")
+        if ticks > SAFE_TICKS:
+            note = f"смещение {ticks:.1f} тика > {SAFE_TICKS}: возможен выход из диапазона, взята худшая оценка"
+            if cons.qty < f.qty:
+                return replace(cons, model="clmm→conservative", fee_ppm=ppm, fee_source=src, note=note)
+            return replace(f, model="v4-clmm-range-risk", note=note)
         return f
 
     def sell(self, qty, mid, extra_slip: Decimal = ZERO) -> Fill:
@@ -93,9 +95,11 @@ class LiveExecutor:
         usd = q_usdg(x * (1 - slip))
         f = Fill("SELL", mid, qty, usd, usd / qty, fee_t * mid, (qty - fee_t) * mid - x, x - usd, self.gas_usd,
                  self.name, ppm, src, f"смещение цены {ticks:.2f} тика")
-        if ticks > SAFE_TICKS and cons.usd < f.usd:
-            return replace(cons, model="clmm→conservative", fee_ppm=ppm, fee_source=src,
-                           note=f"смещение {ticks:.1f} тика > {SAFE_TICKS}: возможен выход из диапазона, взята худшая оценка")
+        if ticks > SAFE_TICKS:
+            note = f"смещение {ticks:.1f} тика > {SAFE_TICKS}: возможен выход из диапазона, взята худшая оценка"
+            if cons.usd < f.usd:
+                return replace(cons, model="clmm→conservative", fee_ppm=ppm, fee_source=src, note=note)
+            return replace(f, model="v4-clmm-range-risk", note=note)
         return f
 
     def liquidation(self, qty, mid) -> Decimal:

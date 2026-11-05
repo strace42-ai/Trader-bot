@@ -16,7 +16,6 @@ import statistics
 
 from . import config as C, sources as S
 from .marketdb import MarketDB
-from .transport import SourceError
 from ..candles import GRACE_SEC, TF_SEC
 
 TFS = ("1h", "4h", "1d")
@@ -53,10 +52,11 @@ class Collector:
             out["quote"] |= self._ds(now)
         if self._due("swaps", C.SCHEDULE["swaps"], now):
             self._swaps(now)
-        if self._due("gas", C.SCHEDULE["gas"], now):
-            self._gas(now)
         if self._due("context", C.SCHEDULE["context"], now):
             self._context(now)
+        gas, _ = self.db.kv("gas", {})
+        if self._due("gas", C.SCHEDULE["gas"], now) or (gas is not None and gas.get("usd_per_swap") is None and self._due("gas_retry", 60, now)):
+            self._gas(now)                  # газ в USD требует цены ETH: после первого контекста пересчитывается сразу
         for tf in TFS:
             nb = self._candles(tf, now)
             if nb:

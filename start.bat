@@ -1,5 +1,6 @@
 @echo off
-rem FABLES Trading Lab — запуск на Windows. Двойной щелчок по этому файлу.
+rem FABLES Trading Lab — фоновый бот + панель в одном окне. Двойной щелчок по этому файлу.
+rem Бот работает, пока открыто это окно (закрытие вкладки браузера его не останавливает).
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
@@ -39,7 +40,7 @@ if errorlevel 1 goto :fail
 
 ".venv\Scripts\python.exe" -m tradinglab serve %*
 echo.
-echo   Сервер остановлен. Состояние сохранено в data\trading_lab.db
+echo   Бот и панель остановлены. Состояние сохранено в data\trading_lab.db
 pause
 exit /b 0
 

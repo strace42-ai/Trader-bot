@@ -97,6 +97,8 @@ class ForwardRunner:
     def _check(self, cmd: str) -> None:
         if self.status not in TRANSITIONS[cmd]:
             raise ControlError(f"{cmd} недоступна в состоянии {self.status}", self.status)
+        if cmd not in self.allowed():
+            raise ControlError(f"{cmd}: нет открытых позиций", self.status)
 
     def _log(self, cmd: str, prev: str, to: str, note: str = "") -> None:
         self.store.log_control(self.experiment_id, int(self.clock()), cmd, prev, to, note, list(self.traders.values()))
@@ -123,7 +125,10 @@ class ForwardRunner:
             params["forward"] = {"late_limit": LC.LATE_LIMIT, "entry_ttl": LC.ENTRY_TTL, "quote_max_age": LC.QUOTE_MAX_AGE,
                                  "source_max_divergence": LC.SOURCE_MAX_DIVERGENCE, "exec_model": "v4-clmm-active-range-estimate",
                                  "exec_slippage": LC.EXEC_SLIPPAGE}
-            exp = f"FW-{now}"
+            exp, n = f"FW-{now}", 1
+            while self.store.experiment(exp) is not None:      # START сразу после STOP в ту же секунду
+                n += 1
+                exp = f"FW-{now}-{n}"
             self.store.create_experiment(exp, "FORWARD", now, params, params_hash(params), "forward paper trading (live)")
             self.traders = {}
             for tf in TFS:
@@ -393,7 +398,7 @@ class ForwardRunner:
                         unprotected.append(tf)
                 if t.position and self.status in ACTIVE and t.pending is None and not handled:
                     if q["valid"]:
-                        t.intrabar(q["mid"], q["mid"], q["mid"], q["ts"], idx, price_ok=True)
+                        t.intrabar(q["mid"], q["mid"], q["mid"], q["ts"], idx, price_ok=True, quote_source=q["source"])
                     else:
                         unprotected.append(tf)
                 if any(t.pending_records().values()):
@@ -425,6 +430,8 @@ class ForwardRunner:
                 return None
             ex = self.executor()
             bh, _ = self.db.kv(f"bh:{self.experiment_id}")
+            if bh is None:          # сравнение начинается с момента, когда B&H куплен: у всех кривых общие timestamps
+                return None
             out = {"mid": q["mid"], "quote_ts": q["ts"], "source": q["source"], "status": self.status, "traders": {}}
             for tf, t in self.traders.items():
                 liq = ex.liquidation(t.portfolio.qty, q["mid"])

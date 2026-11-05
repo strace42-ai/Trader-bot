@@ -92,13 +92,14 @@ class StoreError(Exception):
 
 
 class Store:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, durable: bool = True):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False, timeout=10)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=FULL")
+        # durable=False — только для тестов-воспроизведений (быстро, без fsync каждой транзакции)
+        self.conn.execute("PRAGMA synchronous=FULL" if durable else "PRAGMA synchronous=OFF")
         # одно соединение на процесс; FastAPI вызывает обработчики из пула потоков → ВСЕ обращения к соединению
         # (чтение и запись) сериализуются этой блокировкой (RLock: чтение внутри транзакции того же потока допустимо)
         self.lock = threading.RLock()

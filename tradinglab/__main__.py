@@ -196,6 +196,28 @@ def check(a) -> None:
     gas, _ = db.kv("gas", {})
     ctx = db.last_context("prices")
     print(f"  Газ: {gas}\n  Контекст: {(ctx or {}).get('data')}")
+    # контрольная проверка 1: каждая стратегия получает живые данные и формирует решение сама (без торговли)
+    import bisect
+
+    from .analysis import analyze
+    from .candles import TF_SEC
+    from .forward import ForwardRunner
+    from .strategies import ANALYSIS_PARAMS, STRATEGIES, Ctx
+    r = ForwardRunner(st, clock=lambda: now)
+    an = {tf: analyze(db.candles(tf, now)[0], ANALYSIS_PARAMS[tf]) for tf in ("1h", "4h", "1d")}
+    print("  Решения стратегий на последней закрытой живой свече (проверка, без торговли):")
+    for tf, (strat, fn) in STRATEGIES.items():
+        a_ = an[tf]
+        if not len(a_.s):
+            print(f"    {tf}: нет свечей")
+            continue
+        i = len(a_.s) - 1
+        h = an.get(strat["htf"]) if strat["htf"] else None
+        j = bisect.bisect_right([k.ts + TF_SEC[strat["htf"]] for k in h.s.candles], a_.s.candles[i].ts + TF_SEC[tf]) - 1 if h else None
+        d = fn(Ctx(a_, i, h, j, r.decision_cost(), False, r.market_ctx(an["1d"].s) if tf == "4h" else None, r.fund_ctx(now) if tf == "1d" else None))
+        bad = [c for c in d["conditions"] if c["ok"] is False]
+        print(f"    {tf} {strat['id']}: {d['action']} · свеча {f(d['bar_ts'])} · условий PASS {sum(1 for c in d['conditions'] if c['ok'])}, "
+              f"FAIL {len(bad)}" + (f" · первый блокер: {bad[0]['name']} ({bad[0]['value']} vs {bad[0]['req']})" if bad else ""))
     print(f"  Ошибки: {col.errors or 'нет'}\n  Здоровье: {tr.health.snapshot()}\n")
 
 

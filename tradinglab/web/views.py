@@ -174,3 +174,96 @@ def trader_payload(t, a, mark: dict | None, bh: list | None, extra_diag: dict | 
                      "changes": changes(a, i, t.decisions) if len(a.s) else [], "structure": structure_payload(a, i) if len(a.s) else {}},
         "diagnostics": {"quality": a.s.quality(), "analysis_params": a.p, "cost_model": t.cost.d(), **(extra_diag or {})},
     }
+
+
+# ====================================================================== FORWARD (этап E)
+def next_close(tf: str, now: int) -> int:
+    d = TF_SEC[tf]
+    return (now // d + 1) * d
+
+
+def best_strategy(traders: dict) -> dict:
+    if all(v["closed_trades"] == 0 for v in traders.values()):
+        return {"by_return": None, "by_risk": None, "note": "сделок нет ни у одной стратегии — сравнивать нечего"}
+    by_ret = max(traders, key=lambda k: traders[k]["net_return_pct"])
+    by_risk = max(traders, key=lambda k: traders[k]["net_return_pct"] / max(traders[k]["max_drawdown_pct"], 1.0))
+    return {"by_return": by_ret, "by_risk": by_risk, "note": "доходность / max(просадка, 1%)"}
+
+
+def rejection_stats(decisions: list[dict]) -> dict:
+    """Какие условия чаще всего мешают войти: по всем отклонённым решениям (WAIT/NO_TRADE), а не только по первому блокеру."""
+    rej = [d for d in decisions if d.get("action_final") in ("WAIT", "NO_TRADE", "WARMUP", "SKIPPED")]
+    any_fail, first, risk = {}, {}, {}
+    for d in rej:
+        fails = [c["name"] for c in d.get("conditions") or [] if c.get("ok") is False]
+        for n in fails:
+            any_fail[n] = any_fail.get(n, 0) + 1
+        if fails:
+            first[fails[0]] = first.get(fails[0], 0) + 1
+        for c in d.get("risk") or []:
+            if c.get("ok") is False:
+                risk[c["name"]] = risk.get(c["name"], 0) + 1
+    srt = lambda m: [{"name": k, "count": v, "pct": v / len(rej) * 100 if rej else 0} for k, v in sorted(m.items(), key=lambda x: -x[1])]  # noqa: E731
+    by_action = {}
+    for d in decisions:
+        by_action[d.get("action_final")] = by_action.get(d.get("action_final"), 0) + 1
+    return {"decisions": len(decisions), "rejected": len(rej), "by_action": by_action,
+            "any_fail": srt(any_fail), "first_blocker": srt(first), "risk_fail": srt(risk)}
+
+
+def analysis_only(a) -> dict:
+    i = len(a.s) - 1
+    return {"as_of_ts": a.s.candles[i].ts, "indicators": interpret(a, i), "changes": changes(a, i, []), "structure": structure_payload(a, i)}
+
+
+def sources(live: dict) -> list[dict]:
+    names = {"geckoterminal": "GeckoTerminal OHLCV", "dexscreener": "DexScreener", "rpc": "Robinhood RPC", "coingecko": "CoinGecko BTC/ETH"}
+    out = []
+    h = live.get("health") or {}
+    for k, n in names.items():
+        x = h.get(k)
+        if not x:
+            out.append({"key": k, "name": n, "status": "NO DATA", "ts": None, "note": "запросов ещё не было (бот не запущен?)"})
+            continue
+        st = "OK" if x.get("consecutive_fail", 0) == 0 else "DEGRADED" if x.get("consecutive_fail", 0) < 3 else "DOWN"
+        out.append({"key": k, "name": n, "status": st, "ts": x.get("last_ok"), "age": x.get("age"), "latency_ms": x.get("latency_ms"),
+                    "note": x.get("last_error") or f"вызовов {x.get('calls')}, ошибок {x.get('errors')}"})
+    return out
+
+
+def forward_totals(r, marks: list[dict], live: dict) -> dict:
+    last = marks[-1] if marks else None
+    init = sum(float(t.portfolio.initial) for t in r.traders.values()) or 3000.0
+    if not last:
+        return {"initial_total": init, "total_equity": None, "net_pnl": None, "bh_total": None, "mark_ts": None,
+                "note": "оценок ещё нет: ждём первую проверенную котировку после START"}
+    return {"initial_total": init, "total_equity": last["total"], "net_pnl": last["total"] - init,
+            "net_return_pct": (last["total"] / init - 1) * 100, "bh_total": last.get("bh_total"),
+            "vs_bh_usd": last["total"] - last["bh_total"] if last.get("bh_total") else None,
+            "bh_return_pct": (last["bh_total"] / init - 1) * 100 if last.get("bh_total") else None,
+            "mark_ts": last["ts"], "mark_mid": last["mid"], "mark_source": last["source"],
+            "traders": {tf: v["equity"] for tf, v in last["traders"].items()}}
+
+
+def forward_performance(r, marks: list[dict]) -> dict:
+    """Кривые и метрики FORWARD на ОБЩИХ timestamps синхронных оценок (fw_marks): один момент, одна котировка, одна модель."""
+    curves = {tf: [{"time": m["ts"], "value": m["traders"][tf]["equity"]} for m in marks if tf in m["traders"]] for tf in r.traders}
+    bh = [{"time": m["ts"], "value": m["bh"]["equity"]} for m in marks if m.get("bh")]
+    table = {}
+    last = marks[-1] if marks else None
+    for tf, t in r.traders.items():
+        eq = [p["value"] for p in curves[tf]]
+        mark = {"ts": last["ts"], "mid": last["mid"], "source": last["source"]} if last and (not t.equity_curve or last["ts"] >= t.equity_curve[-1]["ts"]) else None
+        sm = performance.summarize(t, None, TF_SEC[tf], mark=mark) if mark else performance.summarize(t, None, TF_SEC[tf])
+        in_pos = [m for m in marks if m["traders"].get(tf, {}).get("qty", 0) > 0]
+        b = last["bh"]["equity"] if last and last.get("bh") else None
+        table[tf] = {**{k: sm[k] for k in ("equity", "net_pnl", "net_return_pct", "realized_pnl", "unrealized_pnl", "costs_total", "fees",
+                                          "closed_trades", "operations", "win_rate", "profit_factor", "expectancy_usd", "expectancy_r",
+                                          "avg_holding_h", "max_loss_streak", "slippage_bps_mean", "sample", "strategy", "version")},
+                     "max_drawdown_pct": performance.max_drawdown(eq) if eq else 0.0,
+                     "time_in_fables_pct": len(in_pos) / len(marks) * 100 if marks else 0.0,
+                     "bh_equity": b, "vs_bh_usd": sm["equity"] - b if b else None, "vs_bh_ratio": sm["equity"] / b if b else None}
+    bh_eq = [p["value"] for p in bh]
+    return {"curves": curves, "bh": bh, "table": table, "marks": len(marks),
+            "bh_summary": {"equity": bh_eq[-1], "net_pnl": bh_eq[-1] - 1000, "max_drawdown_pct": performance.max_drawdown(bh_eq)} if bh_eq else None,
+            "mark": {k: last[k] for k in ("ts", "mid", "source")} if last else None}
