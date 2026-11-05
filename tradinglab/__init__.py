@@ -3,4 +3,4 @@
 Только симуляция. В пакете нет приватных ключей, подписи и отправки транзакций.
 Документация: docs/trading_lab/STAGE_A_ARCHITECTURE.md
 """
-LAB_VERSION = "0.1.0"
+LAB_VERSION = "0.2.0"

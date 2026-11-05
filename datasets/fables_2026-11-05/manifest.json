@@ -1,0 +1,14 @@
+{
+  "id": "fables_2026-11-05",
+  "recorded_at": "2026-11-05T13:27:00Z",
+  "chain": "robinhood",
+  "chain_id": 4663,
+  "token": "0xb63d07cef74be747231d601bb2faa6b252c68106",
+  "quote_token": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+  "pool_id": "0xcce8dcf7c4dcfee6b6588db724240d9d6a22ee456f9387bb831c8fcea970869e",
+  "candles": {"1h": "gt_ohlcv_h1.json", "4h": "gt_ohlcv_h4.json", "1d": "gt_ohlcv_d1.json"},
+  "candles_source": "GeckoTerminal API v2 /pools/{id}/ohlcv (currency=usd, token=FABLES)",
+  "snapshot": "ds_pair.json",
+  "snapshot_source": "DexScreener /latest/dex/pairs/robinhood/{pool}",
+  "note": "Записанные реальные ответы API. Не дополнялись; последняя свеча каждого ряда не закрыта и отбрасывается кодом."
+}

@@ -14,7 +14,7 @@ from tradinglab.execution import CONSERVATIVE_V1, quote_buy, quote_sell
 from tradinglab.portfolio import AccountingError, Portfolio
 from tradinglab.store import Store, StoreError
 
-FIX = Path(__file__).resolve().parent / "fixtures" / "trading_lab"
+FIX = Path(__file__).resolve().parent.parent / "datasets" / "fables_2026-11-05"
 NOW = int(dt.datetime(2026, 11, 5, 13, 27, tzinfo=dt.UTC).timestamp())
 M = CONSERVATIVE_V1
 H = 3600

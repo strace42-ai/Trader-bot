@@ -38,8 +38,22 @@ def buy_and_hold(s1h: Series, start_ts: int, initial: str, cost: CostModel) -> l
     return out
 
 
+def valuation(traders: dict, bh: list[dict], mark: dict, cost: CostModel) -> dict:
+    """Синхронная оценка всех портфелей и Buy & Hold по одной котировке."""
+    out = {"mark": mark, "traders": {}}
+    for tf, t in traders.items():
+        liq = liquidation_value(t.portfolio.qty, mark["mid"], cost)
+        out["traders"][tf] = {"equity": float(t.portfolio.cash + liq), "cash": float(t.portfolio.cash),
+                              "fables_qty": float(t.portfolio.qty), "fables_value": float(liq)}
+    out["total"] = sum(v["equity"] for v in out["traders"].values())
+    out["bh_per_trader"] = float(liquidation_value(dec(bh[0]["qty"]), mark["mid"], cost)) if bh else None
+    out["bh_total"] = out["bh_per_trader"] * len(traders) if bh else None
+    return out
+
+
 def run(series: dict[str, Series], start_ts: int | None = None, cost: CostModel = CONSERVATIVE_V1, initial: str = "1000",
-        store=None, experiment: str | None = None, tfs=("1h", "4h", "1d")) -> dict:
+        store=None, experiment: str | None = None, tfs=("1h", "4h", "1d"), quote: dict | None = None) -> dict:
+    """quote — внешняя котировка (например, снимок DexScreener); оценка берётся по самой свежей из свечной и внешней."""
     an = {tf: analyze(series[tf], ANALYSIS_PARAMS[tf]) for tf in series}
     if start_ts is None:  # день запуска (хаотичный первый час) — только история, торговля с первых суток после него
         start_ts = series["1d"].candles[1].ts if "1d" in series and len(series["1d"]) > 1 else series["1h"].candles[0].ts
@@ -65,6 +79,8 @@ def run(series: dict[str, Series], start_ts: int | None = None, cost: CostModel 
                 store.commit_bar(tr)
         traders[tf] = tr
     bh = buy_and_hold(series["1h"], start_ts, initial, cost) if "1h" in series else []
-    summary = {tf: performance.summarize(t, bh, TF_SEC[tf]) for tf, t in traders.items()}
+    mark = performance.latest_quote([performance.candle_quote(series.get("1h")), quote])
+    summary = {tf: performance.summarize(t, bh, TF_SEC[tf], mark=mark) for tf, t in traders.items()}
+    val = valuation(traders, bh, mark, cost) if mark else None
     return {"experiment": exp, "start_ts": start_ts, "params": params, "traders": traders, "analyses": an, "bh": bh,
-            "summary": summary}
+            "summary": summary, "valuation": val, "mark": mark}

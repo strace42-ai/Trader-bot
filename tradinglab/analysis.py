@@ -74,7 +74,7 @@ class Analysis:
             "divergences": [d for d in divergence.known_at(self.divs, i) if i - d["confirmed_idx"] <= 30][-10:],
             "levels": structure.sr_levels(pv),
             "fvg": [f for f in self.fvgs if f["idx"] <= i][-5:],
-            "quality": self.s.quality(),
+            "quality": self.s.quality_at(i),
         }
 
     def min_bars(self) -> dict:

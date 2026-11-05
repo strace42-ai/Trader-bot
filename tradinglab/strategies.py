@@ -27,9 +27,12 @@ class Ctx:
     fund: dict | None = None      # ончейн/фундаментальные метрики, если доступны
 
 
-def C(name: str, ok: bool | None, detail: str) -> dict:
-    """ok=None — условие не проверялось (нет данных); такое условие не блокирует, только если это явно разрешено."""
-    return {"name": name, "ok": ok, "detail": detail}
+def C(name: str, ok: bool | None, detail: str, value=None, req: str | None = None) -> dict:
+    """Условие стратегии. ok=None — не проверялось (нет данных).
+    value / req — фактическое значение и требование в том виде, в каком их сравнивает алгоритм (для таблицы
+    «Условие | Значение | Требование | Результат»); заполняются в той же строке, где вычисляется ok."""
+    return {"name": name, "ok": ok, "detail": detail, "value": value, "req": req,
+            "result": "N/A" if ok is None else "PASS" if ok else "FAIL"}
 
 
 def _fmt(x, nd=5):
@@ -73,22 +76,24 @@ def decision(strategy: dict, ctx: Ctx, action: str, conds: list[dict], plan: dic
 def _warm(strategy, ctx, need: int, what: str) -> dict | None:
     have = ctx.i + 1
     if have < need:
-        return decision(strategy, ctx, "WARMUP", [C("История", False, f"{have} из {need} закрытых баров ({what})")], None,
+        return decision(strategy, ctx, "WARMUP", [C("История", False, f"{have} из {need} закрытых баров ({what})", f"{have} баров", f"≥ {need} баров")], None,
                         {}, f"после накопления {need - have} баров")
     return None
 
 
 def _htf_ok(ctx: Ctx, max_adx_down: float, min_rsi: float) -> dict:
     if ctx.htf is None or ctx.j is None:
-        return C("Контекст старшего ТФ", False, "нет закрытых свечей старшего ТФ")
+        return C("Контекст старшего ТФ", False, "нет закрытых свечей старшего ТФ", "нет данных", "закрытая HTF-свеча")
     r = ctx.htf.regime(ctx.j)
     rsi = ctx.htf.v("rsi", ctx.j)
     if r["regime"] == INSUFFICIENT or rsi is None:
-        return C("Контекст старшего ТФ", False, f"{ctx.htf.s.tf}: {INSUFFICIENT}")
+        return C("Контекст старшего ТФ", False, f"{ctx.htf.s.tf}: {INSUFFICIENT}", INSUFFICIENT, "режим и RSI старшего ТФ")
     bad = r["regime"] == "TREND_DOWN" and (r.get("adx") or 0) > max_adx_down
     ok = not bad and rsi > min_rsi
     return C("Контекст старшего ТФ", ok, f"{ctx.htf.s.tf}: {r['regime']}, ADX {_fmt(r.get('adx'), 3)}, RSI {rsi:.1f} "
-             f"(нужно: не сильный нисходящий тренд, RSI > {min_rsi:g})")
+             f"(нужно: не сильный нисходящий тренд, RSI > {min_rsi:g})",
+             f"{r['regime']}, ADX {_fmt(r.get('adx'), 3)}, RSI {rsi:.1f}",
+             f"не TREND_DOWN с ADX > {max_adx_down:g}; RSI > {min_rsi:g}")
 
 
 # ===================================================================== S1 — 1H liquidity sweep reversal
@@ -108,7 +113,7 @@ def s1(ctx: Ctx) -> dict:
     atr = a.v("atr", i)
     inputs = {x: a.v(x, i) for x in ("rsi", "mfi", "cmf", "obv", "atr", "bb_width", "relvol", "macd_hist")}
     if ctx.in_position:
-        return decision(S1, ctx, "HOLD", [C("Позиция", True, "сопровождение: стоп/цель/trailing/time stop в engine")], None,
+        return decision(S1, ctx, "HOLD", [C("Позиция", True, "сопровождение: стоп/цель/trailing/time stop в engine", "LONG", "сопровождение")], None,
                         inputs, "на закрытии следующего бара")
     conds: list[dict] = []
     sweep = None
@@ -120,11 +125,14 @@ def s1(ctx: Ctx) -> dict:
     conds.append(C("Liquidity sweep swing low", sweep is not None,
                    f"прокол уровня {_fmt(sweep['level'])} до {_fmt(sweep['sweep_low'])} ({sweep['depth_atr']:.2f} ATR) на баре {sweep['idx']}, "
                    f"объём ≥ {P['sweep_relvol']}× SMA20" if sweep else
-                   f"за {P['confirm_bars']} бара нет прокола подтверждённого минимума с возвратом и объёмом ≥ {P['sweep_relvol']}×"))
+                   f"за {P['confirm_bars']} бара нет прокола подтверждённого минимума с возвратом и объёмом ≥ {P['sweep_relvol']}×",
+                   f"{sweep['depth_atr']:.2f} ATR, объём {a.v('relvol', sweep['idx']):.2f}×" if sweep else "нет",
+                   f"прокол swing low > {P['sweep_tol_atr']} ATR, close выше уровня, объём ≥ {P['sweep_relvol']}× (за {P['confirm_bars']} бара)"))
     if sweep:
         kk = sweep["idx"]
         conf = k[i].c > k[kk].h
-        conds.append(C("Подтверждение: закрытие выше максимума sweep-свечи", conf, f"close {_fmt(k[i].c)} vs high {_fmt(k[kk].h)}"))
+        conds.append(C("Подтверждение: закрытие выше максимума sweep-свечи", conf, f"close {_fmt(k[i].c)} vs high {_fmt(k[kk].h)}",
+                       f"close {_fmt(k[i].c)}", f"> {_fmt(k[kk].h)}"))
         divs = [d for d in a.divs if d["confirmed_idx"] <= i and d["type"] == "regular_bullish" and d["indicator"] in ("RSI", "MFI", "OBV")
                 and d["p2"]["idx"] >= kk - 6]
         cmf, obv_now, obv_5 = a.v("cmf", i), a.v("obv", i), a.v("obv", i - 5)
@@ -136,14 +144,17 @@ def s1(ctx: Ctx) -> dict:
         if obv_now is not None and obv_5 is not None and obv_now > obv_5:
             flows.append("OBV выше, чем 5 баров назад")
         conds.append(C("Подтверждение денежным потоком", bool(flows), "; ".join(flows) if flows else
-                       f"нет дивергенции RSI/MFI/OBV, CMF {_fmt(cmf, 3)} ≤ 0, OBV не растёт"))
+                       f"нет дивергенции RSI/MFI/OBV, CMF {_fmt(cmf, 3)} ≤ 0, OBV не растёт",
+                       "; ".join(flows) if flows else f"нет; CMF {_fmt(cmf, 3)}",
+                       "бычья дивергенция RSI/MFI/OBV, или CMF > 0, или OBV выше 5 баров назад"))
     conds.append(_htf_ok(ctx, P["htf_max_adx_down"], P["htf_min_rsi"]))
     rsi = a.v("rsi", i)
-    conds.append(C(f"RSI ≤ {P['rsi_max']}", rsi is not None and rsi <= P["rsi_max"], f"RSI {_fmt(rsi, 3)}"))
+    conds.append(C(f"RSI ≤ {P['rsi_max']}", rsi is not None and rsi <= P["rsi_max"], f"RSI {_fmt(rsi, 3)}", _fmt(rsi, 3), f"≤ {P['rsi_max']}"))
     bws = sorted(x for x in a.arr["bb_width"][max(0, i - 100):i + 1] if x is not None)
     bw = a.v("bb_width", i)
     pct = 100 * sum(1 for x in bws if x < bw) / len(bws) if bws and bw is not None else None
-    conds.append(C("Ширина BB не в нижних 10%", pct is not None and pct >= P["bbw_min_pct"], f"перцентиль {_fmt(pct, 3)}%"))
+    conds.append(C("Ширина BB не в нижних 10%", pct is not None and pct >= P["bbw_min_pct"], f"перцентиль {_fmt(pct, 3)}%",
+                   f"{_fmt(pct, 3)}-й перцентиль", f"≥ {P['bbw_min_pct']}-го перцентиля (100 баров)"))
     plan = None
     if sweep:
         entry = k[i].c
@@ -158,7 +169,9 @@ def s1(ctx: Ctx) -> dict:
         gross_ok = t1 is not None and (t1 / entry - 1) >= P["min_gross_vs_roundtrip"] * roundtrip(ctx.cost)
         conds.append(C("Цель ≥ 2 ATR и ≥ 3× круг издержек", gross_ok,
                        f"цель {_fmt(t1)} (+{(t1 / entry - 1) * 100:.2f}%), круг издержек {roundtrip(ctx.cost) * 100:.2f}%" if t1 else
-                       "нет сопротивления выше на ≥ 2 ATR"))
+                       "нет сопротивления выше на ≥ 2 ATR",
+                       f"+{(t1 / entry - 1) * 100:.2f}% ({(t1 - entry) / atr:.2f} ATR)" if t1 else "нет цели",
+                       f"≥ {P['min_target_atr']} ATR и ≥ {P['min_gross_vs_roundtrip'] * roundtrip(ctx.cost) * 100:.2f}%"))
         plan = {"entry_ref": entry, "stop": stop, "t1": t1, "t1_frac": P["t1_frac"], "trail_atr": P["trail_atr"],
                 "trail_ref": "close", "time_stop": P["time_stop"], "rr_net": rr}
     ok = all(c["ok"] for c in conds)
@@ -185,14 +198,17 @@ def s2(ctx: Ctx) -> dict:
     ev = [e for e in a.events if e["idx"] <= i]
     if ctx.in_position:
         brk = [e for e in ev if e["idx"] == i and e["type"] in ("BOS_DOWN", "CHoCH_DOWN")]
-        c = C("Медвежий слом структуры", bool(brk), f"{brk[0]['type']} уровня {_fmt(brk[0]['level'])}" if brk else "нет")
+        c = C("Медвежий слом структуры", bool(brk), f"{brk[0]['type']} уровня {_fmt(brk[0]['level'])}" if brk else "нет",
+              brk[0]["type"] if brk else "нет", "BOS_DOWN / CHoCH_DOWN на этом баре → выход")
         return decision(S2, ctx, "EXIT" if brk else "HOLD", [c], None, inputs, "на закрытии следующего 4H-бара")
     conds: list[dict] = []
     last = ev[-1] if ev else None
     choch = [e for e in ev if e["type"] == "CHoCH_UP" and i - e["idx"] <= P["choch_lookback"]]
     st_ok = bool(last and last["type"] in ("BOS_UP", "CHoCH_UP") and choch)
     conds.append(C("Структура вверх (CHoCH_UP, затем без слома вниз)", st_ok,
-                   f"последнее событие {last['type'] if last else 'нет'}; CHoCH_UP за {P['choch_lookback']} баров: {'да' if choch else 'нет'}"))
+                   f"последнее событие {last['type'] if last else 'нет'}; CHoCH_UP за {P['choch_lookback']} баров: {'да' if choch else 'нет'}",
+                   f"{last['type'] if last else 'нет событий'}; CHoCH_UP: {'да' if choch else 'нет'}",
+                   f"последнее BOS_UP/CHoCH_UP и CHoCH_UP за {P['choch_lookback']} баров"))
     imp = structure.last_impulse_up(a.pivots, i)
     plan = None
     if imp:
@@ -204,34 +220,43 @@ def s2(ctx: Ctx) -> dict:
         ema = a.v("ema_fast", i)
         in_zone = pull_low is not None and (r_dp * 0.99 <= pull_low <= r_sh or (ema is not None and pull_low <= ema * P["ema_touch"] and pull_low >= r_inv))
         conds.append(C("Откат в зону log-Fib 0,382–0,618 или к EMA20", in_zone,
-                       f"импульс {_fmt(L.price)}→{_fmt(H.price)}; минимум отката {_fmt(pull_low)}; зона {_fmt(r_dp)}–{_fmt(r_sh)}; EMA20 {_fmt(ema)}"))
-        conds.append(C("Структура отката не сломана (close > 0,786)", k[i].c > r_inv, f"close {_fmt(k[i].c)} vs {_fmt(r_inv)}"))
+                       f"импульс {_fmt(L.price)}→{_fmt(H.price)}; минимум отката {_fmt(pull_low)}; зона {_fmt(r_dp)}–{_fmt(r_sh)}; EMA20 {_fmt(ema)}",
+                       f"минимум отката {_fmt(pull_low)}", f"{_fmt(r_dp * 0.99)}–{_fmt(r_sh)} или ≤ EMA20×{P['ema_touch']} ({_fmt(ema * P['ema_touch'] if ema else None)})"))
+        conds.append(C("Структура отката не сломана (close > 0,786)", k[i].c > r_inv, f"close {_fmt(k[i].c)} vs {_fmt(r_inv)}",
+                       f"close {_fmt(k[i].c)}", f"> {_fmt(r_inv)}"))
         if pull_low is not None:
             stop = pull_low - P["stop_atr"] * atr
             t1 = H.price
             t2 = pull_low * math.exp(1.618 * math.log(H.price / L.price))
             entry = k[i].c
             rr1, rr2 = rr_net(entry, stop, t1, ctx.cost) if t1 > entry else None, rr_net(entry, stop, t2, ctx.cost)
-            conds.append(C(f"Чистый R:R до T1 ≥ {P['min_rr_t1']}", rr1 is not None and rr1 >= P["min_rr_t1"], f"T1 {_fmt(t1)}, R:R {_fmt(rr1, 3)}"))
+            conds.append(C(f"Чистый R:R до T1 ≥ {P['min_rr_t1']}", rr1 is not None and rr1 >= P["min_rr_t1"], f"T1 {_fmt(t1)}, R:R {_fmt(rr1, 3)}",
+                           _fmt(rr1, 3), f"≥ {P['min_rr_t1']}"))
             plan = {"entry_ref": entry, "stop": stop, "t1": t1, "t2": t2, "t1_frac": P["t1_frac"], "trail_atr": P["trail_atr"],
                     "trail_ref": "high", "time_stop": P["time_stop"], "rr_net": rr2}
     else:
-        conds.append(C("Импульс (swing low → swing high)", False, "нет подтверждённой пары pivots"))
+        conds.append(C("Импульс (swing low → swing high)", False, "нет подтверждённой пары pivots", "нет", "подтверждённые swing low → swing high"))
     hist, hist_prev = a.v("macd_hist", i), a.v("macd_hist", i - 1)
     trig = k[i].c > k[i].o and k[i].c > k[i - 1].h and hist is not None and hist_prev is not None and hist > hist_prev
     conds.append(C("Триггер: бычье закрытие выше high[-1] и разворот MACD hist", trig,
-                   f"close {_fmt(k[i].c)}, open {_fmt(k[i].o)}, high[-1] {_fmt(k[i - 1].h)}, hist {_fmt(hist_prev, 3)}→{_fmt(hist, 3)}"))
+                   f"close {_fmt(k[i].c)}, open {_fmt(k[i].o)}, high[-1] {_fmt(k[i - 1].h)}, hist {_fmt(hist_prev, 3)}→{_fmt(hist, 3)}",
+                   f"close {_fmt(k[i].c)}; hist {_fmt(hist_prev, 3)}→{_fmt(hist, 3)}",
+                   f"close > open ({_fmt(k[i].o)}) и > high[-1] ({_fmt(k[i - 1].h)}); hist растёт"))
     adx_, pdi, ndi = a.v("adx", i), a.v("pdi", i), a.v("ndi", i)
     conds.append(C(f"ADX ≥ {P['adx_min']} и +DI > −DI", adx_ is not None and adx_ >= P["adx_min"] and pdi > ndi,
-                   f"ADX {_fmt(adx_, 3)}, +DI {_fmt(pdi, 3)}, −DI {_fmt(ndi, 3)}"))
+                   f"ADX {_fmt(adx_, 3)}, +DI {_fmt(pdi, 3)}, −DI {_fmt(ndi, 3)}",
+                   f"ADX {_fmt(adx_, 3)}; +DI {_fmt(pdi, 3)} / −DI {_fmt(ndi, 3)}", f"ADX ≥ {P['adx_min']}; +DI > −DI"))
     cmf = a.v("cmf", i)
-    conds.append(C(f"CMF ≥ {P['cmf_min']}", cmf is not None and cmf >= P["cmf_min"], f"CMF {_fmt(cmf, 3)}"))
+    conds.append(C(f"CMF ≥ {P['cmf_min']}", cmf is not None and cmf >= P["cmf_min"], f"CMF {_fmt(cmf, 3)}", _fmt(cmf, 3), f"≥ {P['cmf_min']}"))
     mk = ctx.market or {}
     if "eth_above_ema20" in mk:
         conds.append(C("Рынок: ETH 1D выше EMA20 или FABLES сильнее ETH за 7д",
-                       bool(mk["eth_above_ema20"] or mk.get("rs_vs_eth_7d", 0) > 0), f"{mk}"))
+                       bool(mk["eth_above_ema20"] or mk.get("rs_vs_eth_7d", 0) > 0),
+                       f"ETH {'выше' if mk['eth_above_ema20'] else 'ниже'} EMA20 (1D); FABLES − ETH за 7д: {mk.get('rs_vs_eth_7d', 0) * 100:+.1f} п.п.",
+                       f"ETH {'>' if mk['eth_above_ema20'] else '<'} EMA20; RS {mk.get('rs_vs_eth_7d', 0) * 100:+.1f} п.п.",
+                       "ETH > EMA20 (1D) или RS FABLES/ETH 7д > 0"))
     else:
-        conds.append(C("Рынок: ETH 1D", None, "данные ETH не подключены"))
+        conds.append(C("Рынок: ETH 1D", None, "данные ETH не подключены", "нет данных", "ETH > EMA20 или RS > 0"))
     ok = all(c["ok"] is not False for c in conds) and any(c["ok"] for c in conds) and plan is not None
     first_bad = next((c["name"] for c in conds if c["ok"] is False), "")
     return decision(S2, ctx, "ENTER" if ok else "WAIT", conds, plan, inputs,
@@ -254,7 +279,7 @@ def s3(ctx: Ctx) -> dict:
     atr = a.v("atr", i)
     inputs = {x: a.v(x, i) for x in ("atr", "cmf", "obv", "rsi", "mfi")}
     if ctx.in_position:
-        return decision(S3, ctx, "HOLD", [C("Позиция", True, "сопровождение: trailing 3 ATR / time stop в engine")], None,
+        return decision(S3, ctx, "HOLD", [C("Позиция", True, "сопровождение: trailing 3 ATR / time stop в engine", "LONG", "сопровождение")], None,
                         inputs, "на закрытии следующей дневной свечи")
     conds: list[dict] = []
     rng = None
@@ -267,28 +292,34 @@ def s3(ctx: Ctx) -> dict:
             rng = {"bars": W, "hi": hi, "lo": lo, "touch_hi": th, "touch_lo": tl}
             break
     conds.append(C("Диапазон накопления ≥ 10 дней, ширина ≤ 45%, ≥ 2 касаний", rng is not None,
-                   f"{rng['bars']} дн., {_fmt(rng['lo'])}–{_fmt(rng['hi'])}, касаний {rng['touch_lo']}/{rng['touch_hi']}" if rng else "не найден"))
+                   f"{rng['bars']} дн., {_fmt(rng['lo'])}–{_fmt(rng['hi'])}, касаний {rng['touch_lo']}/{rng['touch_hi']}" if rng else "не найден",
+                   f"{rng['bars']} дн., ширина {(rng['hi'] / rng['lo'] - 1) * 100:.0f}%" if rng else "не найден",
+                   f"{P['range_min']}–{P['range_max']} дн., ширина ≤ {(P['range_max_width'] - 1) * 100:.0f}%, касаний ≥ {P['min_touches']}"))
     plan = None
     if rng:
         conds.append(C("Пробой: close > верх + 0,5 ATR", k[i].c > rng["hi"] + P["break_atr"] * atr,
-                       f"close {_fmt(k[i].c)} vs {_fmt(rng['hi'] + P['break_atr'] * atr)}"))
+                       f"close {_fmt(k[i].c)} vs {_fmt(rng['hi'] + P['break_atr'] * atr)}",
+                       f"close {_fmt(k[i].c)}", f"> {_fmt(rng['hi'] + P['break_atr'] * atr)}"))
         mid = math.sqrt(rng["hi"] * rng["lo"])
         stop = max(mid, k[i].c - P["stop_atr_max"] * atr)
         t1 = rng["hi"] * (rng["hi"] / rng["lo"])
         plan = {"entry_ref": k[i].c, "stop": stop, "t1": t1, "t1_frac": P["t1_frac"], "trail_atr": P["trail_atr"],
                 "trail_ref": "close", "time_stop": P["time_stop"], "rr_net": rr_net(k[i].c, stop, t1, ctx.cost)}
     base = sum(x.v for x in k[i - P["vol_n"]:i]) / P["vol_n"]
-    conds.append(C(f"Объём ≥ {P['vol_x']}× SMA{P['vol_n']}", base > 0 and k[i].v >= P["vol_x"] * base, f"{k[i].v / base:.2f}×" if base else "н/д"))
+    conds.append(C(f"Объём ≥ {P['vol_x']}× SMA{P['vol_n']}", base > 0 and k[i].v >= P["vol_x"] * base, f"{k[i].v / base:.2f}×" if base else "н/д",
+                   f"{k[i].v / base:.2f}×" if base else "н/д", f"≥ {P['vol_x']}×"))
     cmf = a.v("cmf", i)
-    conds.append(C("CMF20 > 0", cmf is not None and cmf > 0, f"CMF {_fmt(cmf, 3)}"))
+    conds.append(C("CMF20 > 0", cmf is not None and cmf > 0, f"CMF {_fmt(cmf, 3)}", _fmt(cmf, 3), "> 0"))
     obv = a.arr["obv"]
     conds.append(C("OBV на 20-дневном максимуме", obv[i] is not None and obv[i] >= max(x for x in obv[i - P["obv_n"] + 1:i + 1] if x is not None),
-                   f"OBV {_fmt(obv[i], 4)}"))
+                   f"OBV {_fmt(obv[i], 4)}", _fmt(obv[i], 4), f"= максимум за {P['obv_n']} дней"))
     f = ctx.fund or {}
     conds.append(C("Ликвидность не упала > 25% за 7д", None if "liq_change_7d" not in f else f["liq_change_7d"] > P["liq_drop_max"],
-                   "нет истории снимков ликвидности" if "liq_change_7d" not in f else f"{f['liq_change_7d'] * 100:.1f}%"))
+                   "нет истории снимков ликвидности" if "liq_change_7d" not in f else f"{f['liq_change_7d'] * 100:.1f}%",
+                   "нет 7-дневной истории" if "liq_change_7d" not in f else f"{f['liq_change_7d'] * 100:+.1f}%", f"> {P['liq_drop_max'] * 100:.0f}%"))
     conds.append(C("Продажи/покупки h24 < 4", None if "sell_buy_h24" not in f else f["sell_buy_h24"] < P["sell_buy_max"],
-                   "нет снимка DexScreener" if "sell_buy_h24" not in f else f"{f['sell_buy_h24']:.2f}"))
+                   "нет снимка DexScreener" if "sell_buy_h24" not in f else f"{f['sell_buy_h24']:.2f}",
+                   "нет снимка" if "sell_buy_h24" not in f else f"{f['sell_buy_h24']:.2f}", f"< {P['sell_buy_max']}"))
     ok = all(c["ok"] is not False for c in conds) and plan is not None
     first_bad = next((c["name"] for c in conds if c["ok"] is False), "")
     return decision(S3, ctx, "ENTER" if ok else "WAIT", conds, plan, inputs,

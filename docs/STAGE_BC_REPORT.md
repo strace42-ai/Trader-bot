@@ -32,7 +32,7 @@ trailing со следующего бара; time stop; блокировка п�
 Найден и исправлен тестом дефект: «пыль» 1e-38 FABLES после частичных продаж → квантование как в чейне.
 
 ## Backtest на записанных свечах (NOT VALIDATED)
-`python -m tradinglab backtest --fixtures tests/fixtures/trading_lab --now 2026-11-05T13:27:00Z`
+`python -m tradinglab backtest --fixtures datasets/fables_2026-11-05 --now 2026-11-05T13:27:00Z`
 Старт 2026-10-21 00:00 UTC, модель `conservative-v1`. Результат: `docs/trading_lab/backtest_fixture_2026-11-05.json`.
 
 | | Сделок | Equity | vs B&H |
