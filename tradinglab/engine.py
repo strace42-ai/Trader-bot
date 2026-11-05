@@ -322,6 +322,14 @@ class Trader:
                 "position": asdict(self.position) if self.position else None, "pending": self.pending,
                 "strategy_version": self.strategy["version"], "risk_version": R.RISK_VERSION, "cost_model": self.cost.name}
 
+    def hydrate(self, store) -> None:
+        """Восстановить журналы из хранилища после рестарта (для отображения и метрик)."""
+        self.ops = store.fills(self.experiment, self.tf)
+        self.trades = store.trades(self.experiment, self.tf)
+        self.decisions = list(reversed(store.decisions(self.experiment, self.tf, 100_000)))
+        self.equity_curve = store.equity(self.experiment, self.tf)
+        self.events = store.events(self.experiment, self.tf)
+
     def load_state(self, s: dict) -> None:
         assert s["tf"] == self.tf and s["experiment"] == self.experiment and s["mode"] == self.mode
         self.state, self.last_bar_ts, self.paused = s["state"], s["last_bar_ts"], s["paused"]

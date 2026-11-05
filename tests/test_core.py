@@ -9,7 +9,7 @@ import pytest
 from tradinglab import analysis, candles, divergence, indicators as ind, structure
 from tradinglab.candles import Candle, Series
 
-FIX = Path(__file__).resolve().parent / "fixtures" / "trading_lab"
+FIX = Path(__file__).resolve().parent.parent / "datasets" / "fables_2026-11-05"
 NOW = int(dt.datetime(2026, 11, 5, 13, 27, tzinfo=dt.UTC).timestamp())  # момент записи фикстур
 
 

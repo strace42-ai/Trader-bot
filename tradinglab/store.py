@@ -14,7 +14,17 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Контролируемые миграции: версия → операторы. Применяются по порядку в одной транзакции, версия записывается в meta.
+MIGRATIONS = {
+    2: [  # журнал команд управления FORWARD (START/PAUSE/RESUME/STOP), только добавление
+        """CREATE TABLE IF NOT EXISTS controls (
+             id INTEGER PRIMARY KEY AUTOINCREMENT, experiment_id TEXT, ts INTEGER NOT NULL, command TEXT NOT NULL,
+             from_status TEXT, to_status TEXT NOT NULL, note TEXT)""",
+        "CREATE TRIGGER IF NOT EXISTS ro_controls_update BEFORE UPDATE ON controls BEGIN SELECT RAISE(ABORT, 'controls: журнал только для добавления'); END",
+        "CREATE TRIGGER IF NOT EXISTS ro_controls_delete BEFORE DELETE ON controls BEGIN SELECT RAISE(ABORT, 'controls: журнал только для добавления'); END",
+    ],
+}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS experiments (
@@ -65,16 +75,26 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
-        self.lock = threading.Lock()
+        # одно соединение на процесс; FastAPI вызывает обработчики из пула потоков → ВСЕ обращения к соединению
+        # (чтение и запись) сериализуются этой блокировкой (RLock: чтение внутри транзакции того же потока допустимо)
+        self.lock = threading.RLock()
         with self.tx() as c:
             for stmt in (SCHEMA + _triggers()).split(";\n"):
                 if stmt.strip():
                     c.execute(stmt)
             row = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if row is None:
-                c.execute("INSERT INTO meta VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
-            elif int(row[0]) > SCHEMA_VERSION:
-                raise StoreError(f"база новее кода: схема {row[0]} > {SCHEMA_VERSION}")
+                c.execute("INSERT INTO meta VALUES('schema_version', '1')")
+                ver = 1
+            else:
+                ver = int(row[0])
+            if ver > SCHEMA_VERSION:
+                raise StoreError(f"база новее кода: схема {ver} > {SCHEMA_VERSION}")
+            for v in range(ver + 1, SCHEMA_VERSION + 1):
+                for stmt in MIGRATIONS[v]:
+                    c.execute(stmt)
+                c.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(v),))
+            self.schema_version = SCHEMA_VERSION
 
     @contextmanager
     def tx(self):
@@ -88,7 +108,16 @@ class Store:
                 raise
 
     def close(self) -> None:
-        self.conn.close()
+        with self.lock:
+            self.conn.close()
+
+    def _all(self, sql: str, args=()) -> list:
+        with self.lock:
+            return self.conn.execute(sql, args).fetchall()
+
+    def _one(self, sql: str, args=()):
+        with self.lock:
+            return self.conn.execute(sql, args).fetchone()
 
     # ------------------------------------------------------------------ эксперименты
     def create_experiment(self, exp_id: str, mode: str, started_at: int, params: dict, params_hash: str, note: str = "") -> None:
@@ -100,11 +129,11 @@ class Store:
                       (exp_id, mode, int(started_at), now_iso(), json.dumps(params, sort_keys=True, default=str), params_hash, note))
 
     def experiment(self, exp_id: str) -> dict | None:
-        r = self.conn.execute("SELECT * FROM experiments WHERE id=?", (exp_id,)).fetchone()
+        r = self._one("SELECT * FROM experiments WHERE id=?", (exp_id,))
         return dict(r) if r else None
 
     def experiments(self) -> list[dict]:
-        return [dict(r) for r in self.conn.execute("SELECT id, mode, started_at, created_at, params_hash, note FROM experiments ORDER BY created_at")]
+        return [dict(r) for r in self._all("SELECT id, mode, started_at, created_at, params_hash, note FROM experiments ORDER BY created_at")]
 
     # ------------------------------------------------------------------ запись обработанной свечи
     def commit_bar(self, trader) -> None:
@@ -142,13 +171,42 @@ class Store:
                       (eid, tf, dump(st), st["last_bar_ts"], now_iso()))
         trader.ack()  # только после COMMIT: при ROLLBACK записи остаются в буфере и уйдут при следующей попытке
 
+    def save_state(self, trader) -> None:
+        """Сохранить состояние трейдера без новых журнальных записей (например, после PAUSE)."""
+        from .util import now_iso
+        st = trader.to_state()
+        with self.tx() as c:
+            c.execute("INSERT INTO trader_state VALUES(?,?,?,?,?) ON CONFLICT(experiment_id, trader) DO UPDATE SET "
+                      "state_json=excluded.state_json, last_bar_ts=excluded.last_bar_ts, updated_at=excluded.updated_at",
+                      (trader.experiment, trader.tf, json.dumps(st, ensure_ascii=False, default=str), st["last_bar_ts"], now_iso()))
+
+    def log_control(self, experiment_id: str | None, ts: int, command: str, from_status: str | None, to_status: str,
+                    note: str = "", traders: list | None = None) -> None:
+        """Команда управления и (опционально) состояния трейдеров — одной транзакцией."""
+        from .util import now_iso
+        with self.tx() as c:
+            c.execute("INSERT INTO controls(experiment_id, ts, command, from_status, to_status, note) VALUES(?,?,?,?,?,?)",
+                      (experiment_id, int(ts), command, from_status, to_status, note))
+            for t in traders or []:
+                st = t.to_state()
+                c.execute("INSERT INTO trader_state VALUES(?,?,?,?,?) ON CONFLICT(experiment_id, trader) DO UPDATE SET "
+                          "state_json=excluded.state_json, last_bar_ts=excluded.last_bar_ts, updated_at=excluded.updated_at",
+                          (t.experiment, t.tf, json.dumps(st, ensure_ascii=False, default=str), st["last_bar_ts"], now_iso()))
+
+    def controls(self, limit: int = 50) -> list[dict]:
+        return [dict(r) for r in self._all("SELECT * FROM controls ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def last_control(self) -> dict | None:
+        r = self._one("SELECT * FROM controls ORDER BY id DESC LIMIT 1")
+        return dict(r) if r else None
+
     # ------------------------------------------------------------------ чтение
     def trader_state(self, exp_id: str, tf: str) -> dict | None:
-        r = self.conn.execute("SELECT state_json FROM trader_state WHERE experiment_id=? AND trader=?", (exp_id, tf)).fetchone()
+        r = self._one("SELECT state_json FROM trader_state WHERE experiment_id=? AND trader=?", (exp_id, tf))
         return json.loads(r[0]) if r else None
 
     def _rows(self, sql: str, args) -> list[dict]:
-        return [json.loads(r[0]) for r in self.conn.execute(sql, args)]
+        return [json.loads(r[0]) for r in self._all(sql, args)]
 
     def fills(self, exp_id: str, tf: str) -> list[dict]:
         return self._rows("SELECT json FROM fills WHERE experiment_id=? AND trader=? ORDER BY ts, op_id", (exp_id, tf))

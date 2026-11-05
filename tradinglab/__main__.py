@@ -1,6 +1,7 @@
-"""CLI Trading Lab (этап C). Только офлайн: сетевых запросов и фоновых процессов нет.
+"""CLI Trading Lab. Сетевых запросов к рынку и фоновых процессов нет.
 
-  python -m tradinglab backtest --fixtures tests/fixtures/trading_lab [--now 2026-11-05T13:27:00Z] [--db PATH] [--json OUT]
+  python -m tradinglab serve [--port 8770] [--data data] [--dataset datasets/fables_2026-11-05] [--no-browser]
+  python -m tradinglab backtest --fixtures datasets/fables_2026-11-05 [--now 2026-11-05T13:27:00Z] [--db PATH] [--json OUT]
 """
 from __future__ import annotations
 
@@ -34,7 +35,16 @@ def main() -> None:
     b.add_argument("--now", default=None, help="момент записи данных (ISO, UTC); свечи, не закрытые к нему, отбрасываются")
     b.add_argument("--db", default=None, help="сохранить журнал в отдельную БД Trading Lab")
     b.add_argument("--json", default=None)
+    sv = sub.add_parser("serve", help="локальная панель FABLES Trading Lab (http://127.0.0.1:PORT/)")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8770)
+    sv.add_argument("--data", default="data", help="папка для trading_lab.db")
+    sv.add_argument("--dataset", default=None, help="папка набора данных (manifest.json)")
+    sv.add_argument("--no-browser", action="store_true")
     a = ap.parse_args()
+    if a.cmd == "serve":
+        serve(a)
+        return
     d = Path(a.fixtures)
     now = _ts(a.now) if a.now else int(dt.datetime.now(dt.UTC).timestamp())
     series = load_fixtures(d, now)
@@ -59,6 +69,52 @@ def main() -> None:
             print(f"   блокирует: {name} — {n} раз")
     if a.json:
         Path(a.json).write_text(json.dumps(out, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+
+
+class InstanceLock:
+    """Один сервер на папку данных: блокировка файла ОС, снимается автоматически при завершении процесса."""
+
+    def __init__(self, path: Path):
+        self.path, self.fh = path, None
+
+    def acquire(self) -> bool:
+        import sys
+        self.fh = open(self.path, "a+")
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                self.fh.seek(0)
+                msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.fh.close()
+            return False
+        return True
+
+
+def serve(a) -> None:
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from .dataset import DEFAULT_DATASET
+    from .web.app import create_app
+    data = Path(a.data)
+    data.mkdir(parents=True, exist_ok=True)
+    lock = InstanceLock(data / "server.lock")
+    if not lock.acquire():
+        print(f"\n  FABLES Trading Lab уже запущен для папки {data.resolve()}. Второй сервер не запускается.\n")
+        return
+    app = create_app(data, Path(a.dataset) if a.dataset else DEFAULT_DATASET)
+    url = f"http://{a.host}:{a.port}/"
+    print(f"\n  FABLES Trading Lab: {url}\n  Данные: {data.resolve()}\n  Режим: PAPER (виртуальная торговля). Сеть не опрашивается."
+          f"\n  Остановить сервер: Ctrl+C или закрыть это окно. Состояние сохраняется в trading_lab.db.\n")
+    if not a.no_browser:
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+    uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
 
 if __name__ == "__main__":
