@@ -14,7 +14,7 @@ const { chromium } = require("playwright");
     const t = window.__lab["1h"], d = t.data, cd = t.s.candle.data(), last = cd.at(-1);
     const fb = d.live.bars.at(-1);
     return { lastTime: last.time, lastColor: last.color, formingTime: fb.time, formingStatus: fb.status, formingClose: fb.close, lastClose: last.close,
-      markers: t.markers.markers().filter((m) => m.time === fb.time).map((m) => m.text),
+      markers: t.markers.markers().filter((m) => m.time === fb.time).map((m) => m.text), markerShapes: t.markers.markers().filter((m) => m.time === fb.time).map((m) => m.shape),
       priceLines: t.s.candle.priceLines().map((l) => l.options().title),
       closedTime: d.candles.at(-1).time, rsiClosed: t.ind.rsi.get(d.candles.at(-1).time), liveRsi: d.live.values.live.rsi };
   });

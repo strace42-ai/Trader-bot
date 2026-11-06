@@ -264,8 +264,7 @@
       st.v2.internal.slice(-30).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
         color: "#6e7783", shape: "circle", size: 0.3, text: "v1 " + lab(e.type) }));
     }
-    liveBars(d).forEach((b) => marks.push({ time: b.time, position: "aboveBar", color: css("--text-secondary"), shape: "square", size: 0.5,
-      text: b.status === "FORMING" ? "FORMING" : "закрыта · ждёт GT" }));
+    // формирующаяся свеча не помечается маркером на графике: её статус (FORMING / закрыта — ждёт GT) — только в подсказке
     marks.sort((a, b) => a.time - b.time);
     return marks;
   }

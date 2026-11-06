@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="lab-token" content="__LAB_TOKEN__">
+  <title>SHADOW LAB · FABLES Trading Lab</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/shadow.css">
+</head>
+<body>
+  <header class="topbar" id="topbar">
+    <div class="topbar-row">
+      <div class="brand">FABLES Trading Lab<small>SHADOW LAB · PAPER</small></div>
+      <nav class="nav"><a href="/">Терминал</a><a href="/performance">Performance</a><a href="/shadow" class="active">SHADOW LAB</a></nav>
+      <div class="spacer"></div>
+      <div class="chips" id="shChips"></div>
+      <div class="ctl" id="shCtl"></div>
+    </div>
+    <div class="kpis" id="shKpis"></div>
+  </header>
+  <div class="banner" id="shBanner">загрузка…</div>
+  <main>
+    <section class="terminal">
+      <div class="term-head">
+        <h2>FABLES/USDG · 4H</h2><span class="strat" id="shStrat"></span><span id="shState"></span>
+        <div class="spacer"></div><span class="muted" id="shAsof"></span>
+      </div>
+      <div class="term-body">
+        <div class="chart-col">
+          <div class="chart-tools" id="shTools">
+            <label><input type="checkbox" data-ov="mswing" checked> Major swings</label>
+            <label><input type="checkbox" data-ov="prot" checked> Protected / structural</label>
+            <label><input type="checkbox" data-ov="mevents" checked> Major события</label>
+            <label><input type="checkbox" data-ov="ievents" checked> Internal iCHoCH/iBOS</label>
+            <label><input type="checkbox" data-ov="iswing"> Internal swings</label>
+            <label><input type="checkbox" data-ov="trades" checked> Решения и сделки P2</label>
+            <label><input type="checkbox" data-ov="plan" checked> План: вход / стоп / T1</label>
+          </div>
+          <div class="chart sh-chart" id="shChart"><div class="legend" id="shLegend"></div><div class="tip" id="shTip"></div></div>
+        </div>
+        <div class="side">
+          <div class="panel-h"><span>Решение P2</span><span id="shDecTs"></span></div>
+          <div class="pos-card" id="shDecision"></div>
+          <div class="panel-h"><span>Позиция</span></div>
+          <div class="pos-card" id="shPosition"></div>
+          <div class="panel-h"><span>Издержки (все операции)</span></div>
+          <div class="pos-card" id="shCosts"></div>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="tabs" id="shTabs">
+        <button data-tab="journal" class="on">Журнал операций и отказов</button>
+        <button data-tab="structure">Структура v3</button>
+        <button data-tab="ready">Готовность и диагностика</button>
+        <button data-tab="rules">Правила и версия</button>
+      </div>
+      <div class="tab-body on" data-tab="journal" id="shJournal"></div>
+      <div class="tab-body" data-tab="structure" id="shStructure"></div>
+      <div class="tab-body" data-tab="ready" id="shReady"></div>
+      <div class="tab-body" data-tab="rules" id="shRules"></div>
+    </section>
+  </main>
+  <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/common.js"></script>
+  <script src="/static/shadow.js"></script>
+</body>
+</html>

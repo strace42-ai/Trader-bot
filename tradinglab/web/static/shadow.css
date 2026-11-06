@@ -1,0 +1,15 @@
+/* SHADOW LAB — дополнения к style.css (те же токены). */
+.sh-chart { min-height: 620px; }
+.sh-kpi-sep { border-left: 2px solid var(--border-strong); }
+.sh-act { font-family: var(--mono); font-weight: 700; font-size: 16px; }
+.sh-act.ENTER, .sh-act.BUY { color: var(--up); }
+.sh-act.EXIT, .sh-act.SELL { color: var(--down); }
+.sh-act.WAIT, .sh-act.HOLD, .sh-act.WARMUP, .sh-act.SKIPPED { color: var(--text-secondary); }
+.sh-note { color: var(--text-muted); font-size: 11.5px; margin-top: 6px; }
+.sh-filter { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.sh-filter button { background: transparent; border: 1px solid var(--border-strong); color: var(--text-secondary); border-radius: 10px; padding: 1px 10px; cursor: pointer; font-size: 11.5px; }
+.sh-filter button.on { color: var(--text-primary); border-color: var(--accent); }
+.sh-scroll { max-height: 520px; overflow: auto; }
+.sh-ck { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.sh-ck div { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; }
+@media (max-width: 640px) { .sh-chart { min-height: 440px; } .sh-ck { grid-template-columns: minmax(0, 1fr); } }

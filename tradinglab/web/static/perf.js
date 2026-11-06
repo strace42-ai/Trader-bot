@@ -117,13 +117,53 @@
     renderForward(p.forward);
   }
 
+  // ---------------------------------------------------------------- SHADOW: отдельный $1 000, в $3 000 не входит
+  const SH = [["shadow", "SHADOW P2 4H", "--s-violet"], ["s2", "S2 (Trader 4H, норм. к $1 000)", "--s2"], ["bh", "Buy & Hold", "--s4"], ["cash", "Кеш", "--text-muted"]];
+  let schart = null;
+  const slines = {};
+  function buildShadow() {
+    schart = LW.createChart(document.getElementById("shPerfChart"), {
+      autoSize: true,
+      layout: { background: { type: LW.ColorType.Solid, color: css("--surface-1") }, textColor: css("--text-muted"), fontSize: 11, fontFamily: css("--mono") },
+      grid: { vertLines: { color: "#151a21" }, horzLines: { color: "#151a21" } },
+      rightPriceScale: { borderColor: css("--border") }, timeScale: { borderColor: css("--border"), timeVisible: true },
+      localization: { locale: "ru-RU", priceFormatter: (p) => "$" + p.toFixed(2) },
+    });
+    SH.forEach(([k, name, c]) => (slines[k] = schart.addSeries(LW.LineSeries, { color: css(c), lineWidth: k === "cash" ? 1 : 2, title: name, priceLineVisible: false,
+      lineStyle: k === "cash" ? LW.LineStyle.Dashed : LW.LineStyle.Solid })));
+  }
+  function renderShadow(s) {
+    document.getElementById("shLegend").innerHTML = SH.map(([, n, c]) => `<span><i style="background:var(${c})"></i>${esc(n)}</span>`).join("");
+    document.getElementById("shBadge").innerHTML = `<span class="badge ${Lab.STATUS_BADGE[s.status] || ""}">SHADOW: ${esc(Lab.STATUS_RU[s.status] || s.status)}</span>`;
+    const body = document.getElementById("shBody");
+    if (!s.experiment || !s.rows || !s.rows.length) {
+      SH.forEach(([k]) => slines[k].setData([]));
+      body.innerHTML = `<div class="empty">${esc(s.note || "SHADOW не активирован")}. Портфель SHADOW ($1 000) не входит в $3 000 основного FORWARD.</div>`;
+      return;
+    }
+    SH.forEach(([k]) => slines[k].setData(dedupe(s.rows.filter((r) => r[k] != null).map((r) => ({ time: r.ts, value: r[k] })))));
+    schart.timeScale().fitContent();
+    const last = s.rows.at(-1), R = s.return_pct, t = s.table || {};
+    body.innerHTML = `<table class="t"><tr><th>Показатель</th><th>SHADOW P2 4H</th><th>S2 (4H)</th><th>Buy &amp; Hold</th><th>Кеш</th></tr>
+      <tr><td>Equity (на $1 000)</td>${["shadow", "s2", "bh", "cash"].map((k) => `<td class="n">${fmt.usd(last[k])}</td>`).join("")}</tr>
+      <tr><td>Доходность с активации SHADOW</td>${["shadow", "s2", "bh", "cash"].map((k) => `<td class="n ${fmt.cls(R[k])}">${fmt.sPct(R[k])}</td>`).join("")}</tr>
+      <tr><td>Сделок / Win Rate / PF</td><td class="n">${t.closed_trades ?? 0} / ${t.win_rate == null ? "—" : fmt.pct(t.win_rate, 0)} / ${t.profit_factor == null ? "—" : fmt.num(t.profit_factor, 2)}</td><td class="n">см. FORWARD</td><td class="n">—</td><td class="n">—</td></tr>
+      <tr><td>Expectancy R / Max DD</td><td class="n">${t.expectancy_r == null ? "—" : fmt.num(t.expectancy_r, 2) + "R"} / ${fmt.pct(t.max_drawdown_pct)}</td><td class="n">—</td><td class="n">${s.bh_summary ? fmt.pct(s.bh_summary.max_drawdown_pct) : "—"}</td><td class="n">0%</td></tr></table>
+      <div class="muted" style="margin-top:6px">${esc(s.strategy)} · эксперимент ${esc(s.experiment)} · с ${fmt.dt(s.since)} · оценок ${s.marks}. ${esc(s.note)}.
+      Контрольные точки: 30 / 60 / 120 дней; 20 сделок — минимум для предварительного анализа, не доказательство.</div>`;
+  }
+
   async function refresh() {
     const [o, p] = await Promise.all([api("/api/overview"), api("/api/performance")]);
     Lab.renderTopbar(o, o.forward.status === "NOT_STARTED" ? "BACKTEST" : "FORWARD", "performance");
     render(p);
+    api("/api/shadow/performance").then(renderShadow).catch((e) => {      // сбой SHADOW не мешает основной странице
+      document.getElementById("shBody").innerHTML = `<div class="empty">SHADOW недоступен: ${esc(e.message)}</div>`;
+    });
   }
   build();
   buildForward();
+  buildShadow();
   setInterval(() => refresh().catch(() => {}), 30000);
   refresh().catch((e) => { document.getElementById("perfNote").textContent = "Ошибка загрузки: " + e.message; });
   document.addEventListener("lab:refresh", () => refresh().catch(() => {}));

@@ -130,7 +130,9 @@ def test_forming_candle_replaces_live_line(live_ui):
     i = live_ui["info"]
     assert i["lastTime"] == i["formingTime"] > i["closedTime"] and i["formingStatus"] == "FORMING"
     assert ".35" in i["lastColor"] and i["lastClose"] == i["formingClose"]          # полупрозрачная, close = текущая цена
-    assert "FORMING" in i["markers"] and "Live" not in i["priceLines"]
+    assert "Live" not in i["priceLines"]
+    # статус формирующейся свечи — только в подсказке: ни надписи FORMING, ни серого квадратного маркера на графике
+    assert not any("FORMING" in m or "ждёт GT" in m for m in i["markers"]) and "square" not in i["markerShapes"]
 
 
 def test_tooltips_on_forming_and_closed_bars_all_panes(live_ui):
@@ -282,3 +284,169 @@ def test_4h_own_major_and_optional_1h_comparison_layer(major_ui):
     assert off["major"] == off["api4"]
     assert on["ltf"] == on["api"] and on["major"] == off["major"]                             # отдельная серия, 4H major не меняется
     assert sum(1 for m in on["markers"] if "(сравн.)" in m) == len(on["api"])
+
+
+# ====================================================================== тест 9: формирующаяся свеча без маркера, но обновляется
+@pytest.fixture(scope="module")
+def forming_ui(tmp_path_factory):
+    ne = _node_env()
+    if ne is None:
+        pytest.skip("Node.js + Playwright не установлены — UI-тест пропущен")
+    import uvicorn
+    from replay import Clock, Market, run, ts
+    from tradinglab.live.worker import Worker
+    from tradinglab.store import Store
+    from tradinglab.web.app import create_app
+    d = tmp_path_factory.mktemp("forming")
+    clock = Clock(ts("2026-11-04T20:02:00Z"))
+    w = Worker(Store(d / "trading_lab.db", durable=False), Market(clock).transport(), clock)
+    run(w, clock, ts("2026-11-04T20:30:00Z"))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(create_app(d, clock=clock), host="127.0.0.1", port=port, log_level="error"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.1)
+    stop = threading.Event()
+
+    def ticker():                       # бот продолжает работать: +60 с рыночного времени каждые 0,5 с (в пределах того же часа)
+        while not stop.is_set() and clock.t < ts("2026-11-04T20:55:00Z"):
+            clock.t += 60
+            w.tick(clock.t)
+            stop.wait(0.5)
+    tk = threading.Thread(target=ticker, daemon=True)
+    try:
+        tk.start()
+        r = subprocess.run([ne[0], str(SCRIPT.parent / "forming_check.js"), f"http://127.0.0.1:{port}/"], env=ne[1], capture_output=True, text=True, timeout=180)
+    finally:
+        stop.set()
+        tk.join(10)
+        srv.should_exit = True
+        th.join(10)
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    if "fatal" in out and "Executable doesn't exist" in out["fatal"]:
+        pytest.skip("браузер Playwright не установлен")
+    assert "fatal" not in out, out
+    return out
+
+
+@pytest.mark.parametrize("tf", ["1h", "4h", "1d"])
+def test_no_forming_label_or_grey_marker_but_live_candle_updates(forming_ui, tf):
+    a, b = forming_ui["first"][tf], forming_ui["second"][tf]
+    for x in (a, b):
+        assert x["time"] == x["fbTime"] and x["status"] == "FORMING"            # последняя свеча графика — формирующаяся
+        assert x["markers"] == [] and x["allSquares"] == 0                     # ни надписи, ни серого квадрата
+    assert a["time"] == b["time"]                                              # та же свеча…
+    assert (a["c"], a["h"], a["l"]) != (b["c"], b["h"], b["l"])                # …но OHLC обновились по новым котировкам
+    assert b["v"] is not None
+
+
+def test_forming_status_kept_in_tooltip(forming_ui):
+    assert "FORMING" in forming_ui["tipText"] and forming_ui["errs"] == []
+
+
+# ====================================================================== тест 8: SHADOW LAB в Chromium
+@pytest.fixture(scope="module")
+def shadow_ui(tmp_path_factory):
+    import os
+    ne = _node_env()
+    if ne is None:
+        pytest.skip("Node.js + Playwright не установлены — UI-тест пропущен")
+    import uvicorn
+    from replay import Clock, Market, run, ts
+    from test_shadow import enter_once
+    from tradinglab.live.worker import Worker
+    from tradinglab.shadow.process import ShadowProcess
+    from tradinglab.store import Store
+    from tradinglab.web.app import create_app
+    d = tmp_path_factory.mktemp("shadow")
+    clock = Clock(ts("2026-11-04T23:40:00Z"))
+    w = Worker(Store(d / "trading_lab.db", durable=False), Market(clock).transport(), clock)
+    run(w, clock, ts("2026-11-04T23:45:00Z"))
+    w.runner.start()
+    sp = ShadowProcess(d, clock, durable=False)
+    sp.tick(clock.t)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(create_app(d, worker=w, clock=clock), host="127.0.0.1", port=port, log_level="error"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.1)
+    stop = threading.Event()
+
+    def ticker():
+        """Основной бот и процесс SHADOW работают; после START (через страницу) время идёт к закрытию 4H-свечи 00:00."""
+        while not stop.is_set():
+            r = sp.runner
+            if r is not None and r.status == "RUNNING" and "4h" in r.traders:
+                t = r.traders["4h"]
+                if not getattr(t, "_stub", False):
+                    t.fn, t._stub = enter_once(), True             # заглушка входа: проверка интерфейса исполнения
+                if clock.t < ts("2026-11-05T00:20:00Z"):
+                    clock.t += 30
+            w.tick(clock.t)
+            sp.tick(clock.t)
+            stop.wait(0.15)
+    tk = threading.Thread(target=ticker, daemon=True)
+    shots = os.environ.get("SHADOW_SHOTS", "")
+    try:
+        tk.start()
+        r = subprocess.run([ne[0], str(SCRIPT.parent / "shadow_check.js"), f"http://127.0.0.1:{port}/", shots], env=ne[1],
+                           capture_output=True, text=True, timeout=300)
+    finally:
+        stop.set()
+        tk.join(10)
+        srv.should_exit = True
+        th.join(10)
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    if "fatal" in out and "Executable doesn't exist" in out["fatal"]:
+        pytest.skip("браузер Playwright не установлен")
+    assert "fatal" not in out, (out, r.stderr[-2000:])
+    out["main_exp"] = w.runner.experiment_id
+    out["main_fills"] = {tf: len(w.store.fills(w.runner.experiment_id, tf)) for tf in ("1h", "4h", "1d")}
+    return out
+
+
+def test_shadow_lab_before_activation_shows_preview_and_no_trades(shadow_ui):
+    x = shadow_ui["pre"]
+    assert x["status"] == "NOT_STARTED" and not x["trader"]
+    assert x["chartBars"] >= x["candles"] > 30 and x["majorSwings"] >= 2
+    assert any(m.endswith("· major") for m in x["markers"]) and not any("FORMING" in m for m in x["markers"])
+    assert "ПРЕДПРОСМОТР" in x["decision"] and "Major TRANSITION" in x["decision"] and "R:R" in x["decision"]
+    assert "не входит" in x["banner"] and "только на чтение" in x["banner"]
+    assert "$1 000" in x["kpis"].replace("\xa0", " ") and "CASH" in x["kpis"].upper() and "EQUITY" in x["kpis"].upper()
+    ctl = dict(shadow_ui["pre"]["ctl"])
+    assert ctl["START"] is False and ctl["STOP"] is True and ctl["EMERGENCY EXIT"] is True
+    assert "Основной бот работает" in x["ready"] and "Тики CLMM" in x["ready"]
+
+
+def test_shadow_lab_start_position_close_journal(shadow_ui):
+    r, c = shadow_ui["run"], shadow_ui["closed"]
+    assert r["status"] == "RUNNING" and "Вход" in r["position"] and {"вход P2", "стоп P2", "T1 P2"} <= set(r["priceLines"])
+    assert any(m.startswith("BUY") for m in r["markers"]) and any(m == "P2 ENTER" for m in r["markers"])
+    assert "Комиссия hook" in r["costs"] and "Газ" in r["costs"]
+    assert any(m.startswith("SELL") for m in c["markers"]) and "Позиции нет" in c["position"]
+    for s in ("ENTER", "BUY", "SELL", "PAPER", "CLOSE POSITION"):
+        assert s in c["journal"], s
+    assert "SHADOW LAB" in shadow_ui["nav"]
+    assert shadow_ui["main_fills"] == {"1h": 0, "4h": 0, "1d": 0}         # основной FORWARD не получил ни одной операции
+
+
+def test_shadow_lab_mobile_and_no_console_errors(shadow_ui):
+    assert shadow_ui["mob"]["sw"] <= shadow_ui["mob"]["cw"]
+    assert shadow_ui["errs"] == []
+
+
+def test_performance_compares_shadow_s2_bh_cash(shadow_ui):
+    t = shadow_ui["perf"]["text"].upper()
+    for x in ("SHADOW P2 4H", "S2 (4H)", "BUY & HOLD", "КЕШ", "НЕ ВХОДИТ", "ДОХОДНОСТЬ С АКТИВАЦИИ SHADOW"):
+        assert x in t, x
+    assert "SHADOW P2 4H" in shadow_ui["perf"]["legend"] and "S2" in shadow_ui["perf"]["legend"]

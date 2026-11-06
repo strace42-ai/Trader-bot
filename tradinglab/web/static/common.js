@@ -117,6 +117,7 @@ const Lab = (() => {
         <nav class="nav">
           <a href="/" class="${page === "terminal" ? "active" : ""}">Терминал</a>
           <a href="/performance" class="${page === "performance" ? "active" : ""}">Performance</a>
+          <a href="/shadow" class="${page === "shadow" ? "active" : ""}">SHADOW LAB</a>
         </nav>
         ${page === "terminal" ? `<div class="seg" id="modeSeg">
           <button data-mode="FORWARD" class="${fwd ? "on" : ""}">FORWARD · LIVE</button>

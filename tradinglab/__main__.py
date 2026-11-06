@@ -5,6 +5,7 @@
   python -m tradinglab web   [--port 8770] [--data data]                  только интерфейс (бот запущен отдельно)
   python -m tradinglab check [--data DIR]                                 разовая проверка источников живых данных
   python -m tradinglab doctor [--data data] [--port 8770]                 полная диагностика + файл отчёта для поддержки
+  python -m tradinglab shadow [--data data] [--check]                     SHADOW LAB: отдельный paper-процесс P2-4H (shadow.bat)
   python -m tradinglab audit [--tf 1h] [--md FILE]                        аудит индикаторов: ядро vs эталон Pine/TradingView (живые данные)
   python -m tradinglab backtest --fixtures datasets/fables_2026-11-05 [--now 2026-11-05T13:27:00Z] [--db PATH] [--json OUT]
 """
@@ -53,6 +54,9 @@ def main() -> None:
             sv.add_argument("--port", type=int, default=8770)
             sv.add_argument("--dataset", default=None, help="папка записанного набора данных для BACKTEST")
             sv.add_argument("--no-browser", action="store_true")
+    sh = sub.add_parser("shadow", help="SHADOW LAB: отдельный paper-процесс SHADOW-P2-4H (читает trading_lab.db только на чтение)")
+    sh.add_argument("--data", default="data", help="папка с trading_lab.db (только чтение) и shadow_lab.db")
+    sh.add_argument("--check", action="store_true", help="только проверка готовности к активации (без цикла и сделок)")
     au = sub.add_parser("audit", help="аудит индикаторов по живым данным (ядро vs эталон Pine/TradingView)")
     au.add_argument("--tf", default="1h", choices=["1h", "4h", "1d"])
     au.add_argument("--md", default=None, help="записать отчёт в Markdown")
@@ -61,6 +65,9 @@ def main() -> None:
     if a.cmd == "audit":
         audit_cli(a)
         return
+    if a.cmd == "shadow":
+        from .shadow.process import main as shadow_main
+        raise SystemExit(shadow_main(a.data, a.check))
     if a.cmd in ("serve", "web", "bot"):
         run(a)
         return

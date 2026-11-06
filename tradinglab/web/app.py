@@ -405,6 +405,12 @@ def create_app(data_dir: Path | str = "data", dataset_path: Path | str = ds_mod.
         except ControlError as e:
             raise HTTPException(409, {"error": str(e), "status": e.status})
 
+    try:                                   # SHADOW LAB: отдельная страница и API; сбой подключения не влияет на основной FORWARD
+        from ..shadow.web import attach as shadow_attach
+        shadow_attach(app, lab, _page)
+    except Exception:  # noqa: BLE001
+        log.exception("SHADOW LAB не подключён")
+
     app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
     return app
 
