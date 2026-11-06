@@ -1,0 +1,7 @@
+{
+ "id": "structure_v3_2026-11-06",
+ "files": {
+  "fables_gt_full.json": "GeckoTerminal OHLCV FABLES/USDG 1H/4H/1D — вся история с запуска (limit 1000), rows[tf], fetched_at"
+ },
+ "purpose": "исследование структуры v3 (не используется стратегиями)"
+}
