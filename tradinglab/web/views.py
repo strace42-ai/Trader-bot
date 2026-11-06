@@ -105,6 +105,10 @@ def changes(a, i: int, decisions: list) -> list[str]:
 
 
 def structure_payload(a, i: int) -> dict:
+    from .. import structure_v2
+    v2 = structure_v2.analyze_structure(a)
+    st_v2 = v2["state"][i] if v2["state"] else {"trend": "none", "protected": None}
+    last_ext = [e for e in v2["external"] if e["idx"] <= i]
     pv = structure.known_at(a.pivots, i)
     imp = structure.last_impulse_up(a.pivots, i)
     fib = None
@@ -124,6 +128,13 @@ def structure_payload(a, i: int) -> dict:
         "fvg": [f for f in a.fvgs if f["idx"] <= i][-10:],
         "fib": fib,
         "regime": a.regime(i),
+        "v2": {"version": v2["version"], "k_atr": v2["k_atr"],
+               "external": [e for e in v2["external"] if e["idx"] <= i][-40:],
+               "internal": [e for e in v2["internal"] if e["idx"] <= i][-60:],
+               "swings": [sw for sw in v2["swings"] if sw["confirmed_idx"] <= i][-30:],
+               "trend": st_v2["trend"], "protected": st_v2["protected"],
+               "protected_src": last_ext[-1]["protected_src"] if last_ext else None,
+               "note": "Внешняя swing-структура v2 — ИССЛЕДОВАНИЕ: стратегией S2 v1.0.0 не используется (S2 использует внутреннюю = iBOS/iCHoCH)."},
     }
 
 
