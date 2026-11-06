@@ -148,6 +148,34 @@ def _history(s) -> str:
     return "launch" if s.candles and s.candles[0].ts <= FABLES_LAUNCH_TS else "truncated"
 
 
+def _annotate_major_swings(m: dict, r: dict) -> None:
+    """Только представление (ядро v3 не меняется): для swing с tier=major — метка HH/HL/LH/LL относительно предыдущего
+    MAJOR-swing того же вида (а не любого swing ZigZag), обоснование каждой роли конкретным событием ядра и момент,
+    с которого точка доступна как major (не раньше подтверждения ZigZag и назначения первой роли)."""
+    prev: dict = {}
+    for w in m["swings"]:
+        if w["tier"] != "major":
+            continue
+        q = prev.get(w["kind"])
+        w["major_label"] = "" if q is None else ("HH" if w["price"] > q else "LH") if w["kind"] == "H" else ("HL" if w["price"] > q else "LL")
+        prev[w["kind"]] = w["price"]
+        first = min((x["assigned_ts"] for x in w["roles"] if x.get("assigned_ts")), default=w["confirmed_ts"])
+        w["available_ts"] = max(w["confirmed_ts"], first)
+        basis = []
+        for x in w["roles"]:
+            role, ts = x["role"], x.get("assigned_ts")
+            if role.startswith("protected"):
+                p = next((p for p in m["protected_history"] if p["src_ts"] == w["ts"] and p["set_ts"] == ts), None)
+                basis.append(f"{role}: {p['reason']}" if p else role)
+            elif role.startswith("broken"):
+                ev = next((e for e in m["events"] if e["known_ts"] == ts and e["type"].startswith("BOS")), None)
+                basis.append(f"{role}: {ev['type']} — {ev['why']}" if ev else role)
+            else:
+                basis.append(f"{role}: самая крайняя точка major-диапазона с откатом ≥ k·ATR после неё и без закрытия за ней "
+                             "(граница диапазона / цель BOS)")
+        w["role_basis"] = basis
+
+
 def structure_v3_payload(s, htf_s=None) -> dict:
     """Структура v3 (исследование и визуализация; стратегиями не используется). s — закрытые свечи ТФ,
     htf_s — закрытые свечи старшего ТФ (контекст: при UNDEFINED подтверждения не даёт)."""
@@ -178,6 +206,7 @@ def structure_v3_payload(s, htf_s=None) -> dict:
                         f"{(hst['ph'] if hdir == 'DOWN' else hst['pl']):.6g}" if (hst['ph'] if hdir == 'DOWN' else hst['pl']) else "")
                         + (f" — HTF_CONFLICT с major {s.tf.upper()} {mdir}" if mdir and hdir != mdir else ""))}
     m = r["major"]
+    _annotate_major_swings(m, r)
     rng = {"top": m["state"]["ph"] if m["state"] and m["state"]["ph"] else None,
            "bottom": m["state"]["pl"] if m["state"] and m["state"]["pl"] else None}
     for kind in ("H", "L"):

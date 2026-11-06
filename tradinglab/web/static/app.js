@@ -7,7 +7,7 @@
   const TFS = ["1h", "4h", "1d"];
   const TITLES = { "1h": "TRADER 1H", "4h": "TRADER 4H", "1d": "TRADER 1D" };
   const TF_DT = { "1h": 3600, "4h": 14400, "1d": 86400 };
-  const OV_OFF = new Set(["fib", "ievents", "iswing", "legacy"]);   // слои, выключенные по умолчанию (читаемость)
+  const OV_OFF = new Set(["fib", "ievents", "iswing", "iswing_mid", "legacy"]);   // слои, выключенные по умолчанию (читаемость)
   const TABS = [["overview", "Обзор"], ["ind", "Индикаторы"], ["struct", "Структура"], ["onchain", "Ончейн"], ["dec", "Решения"], ["audit", "Аудит индикаторов"], ["diag", "Диагностика"]];
   const MOBILE = () => window.matchMedia("(max-width: 640px), (hover: none)").matches;
   const OSC = ["rsi", "macd", "mfi", "cmf", "obv"];          // панели осцилляторов сверху вниз (значения — из ядра)
@@ -33,7 +33,7 @@
           <div class="chart-tools" data-f="tools">
             ${[["ema", "EMA", "--s1"], ["bb", "Bollinger", "--text-muted"], ["vol", "Объём", "--text-muted"], ["levels", "Уровни S/R", "--text-secondary"],
                ["fib", "Fibonacci", "--s4"],
-               ["mswing", "Major swings v3", "--s-violet"], ["mevents", "Major BOS/CHoCH v3", "--s2"], ["prot", "Protected v3", "--down"],
+               ["mswing", "Major swings v3", "--s-violet"], ["iswing_mid", "Intermediate swings", "--text-secondary"], ["mevents", "Major BOS/CHoCH v3", "--s2"], ["prot", "Protected v3", "--down"],
                ["ievents", "iBOS/iCHoCH v3 (internal)", "--text-muted"], ["iswing", "Локальные swing", "--text-muted"], ["phase", "Фаза и диапазон", "--s4"],
                ["legacy", "Legacy v1/v2", "--text-muted"],
                ["div", "Дивергенции", "--up"], ["trades", "Сделки", "--text-primary"]]
@@ -238,8 +238,11 @@
     const lab = (x) => x.replace("_UP", "↑").replace("_DOWN", "↓");
     const v3 = S3(tf);
     if (v3 && !v3.empty) {
-      if (on("mswing")) v3.major.swings.forEach((w) => marks.push({ time: w.ts, position: w.kind === "H" ? "aboveBar" : "belowBar",
-        color: w.tier === "major" ? css("--s-violet") : "#7d8590", shape: "circle", size: w.tier === "major" ? 0.7 : 0.25, text: w.label || w.kind }));
+      // major: только точки со структурной ролью ядра (tier === "major"); intermediate — отдельный слой
+      if (on("mswing")) v3.major.swings.filter((w) => w.tier === "major").forEach((w) => marks.push({ time: w.ts, position: w.kind === "H" ? "aboveBar" : "belowBar",
+        color: css("--s-violet"), shape: "circle", size: 0.8, text: (w.major_label || w.kind) + " · major" }));
+      if (on("iswing_mid")) v3.major.swings.filter((w) => w.tier === "intermediate").forEach((w) => marks.push({ time: w.ts, position: w.kind === "H" ? "aboveBar" : "belowBar",
+        color: "#7d8590", shape: "circle", size: 0.25, text: "int·" + (w.label || w.kind) }));
       if (on("mevents")) v3.major.events.forEach((e) => marks.push({ time: e.ts, position: /UP|HIGH/.test(e.type) ? "aboveBar" : "belowBar",
         color: e.type.startsWith("CHoCH") ? css("--s2") : e.type.startsWith("BOS") ? css("--s-violet") : e.type === "AMBIGUOUS" ? css("--warn") : "#9aa4af",
         shape: e.type.startsWith("SWEEP") || e.type === "AMBIGUOUS" ? "square" : /UP/.test(e.type) ? "arrowUp" : "arrowDown", size: e.type.startsWith("SWEEP") ? 0.4 : 1,
@@ -306,11 +309,19 @@
       return x;
     };
     const v3 = S3(tf);
-    t.v3lines = { mswing: 0, mevents: 0, prot: 0, ievents: 0, iswing: 0, phase: 0 };
+    t.v3lines = { mswing: 0, iswing_mid: 0, mevents: 0, prot: 0, ievents: 0, iswing: 0, phase: 0 };
+    t.v3series = {};
     if (v3 && !v3.empty) {
       const lastT = d.candles.at(-1)?.time;
-      if (on("mswing") && line(v3.major.swings.map((w) => ({ time: w.ts, value: w.price })), css("--s-violet"), 1, LW.LineStyle.Solid)) t.v3lines.mswing++;
-      if (on("iswing") && line(v3.internal.swings.map((w) => ({ time: w.ts, value: w.price })), "#56606c", 1, LW.LineStyle.Dotted)) t.v3lines.iswing++;
+      // главная линия — напрямую от одного major-экстремума к следующему, без промежуточных точек
+      if (on("mswing")) { const x = line(v3.major.swings.filter((w) => w.tier === "major").map((w) => ({ time: w.ts, value: w.price })), css("--s-violet"), 2, LW.LineStyle.Solid);
+        if (x) { t.v3lines.mswing++; t.v3series.major = x; } }
+      // intermediate: тонкий пунктир по полному major-ZigZag (major + intermediate), отдельной серией
+      if (on("iswing_mid")) { const x = line(v3.major.swings.map((w) => ({ time: w.ts, value: w.price })), "#7d8590", 1, LW.LineStyle.Dotted);
+        if (x) { t.v3lines.iswing_mid++; t.v3series.inter = x; } }
+      // internal — собственная модель (ZigZag internal), не смешивается с intermediate
+      if (on("iswing")) { const x = line(v3.internal.swings.map((w) => ({ time: w.ts, value: w.price })), "#56606c", 1, LW.LineStyle.Dotted);
+        if (x) { t.v3lines.iswing++; t.v3series.internal = x; } }
       if (on("mevents")) v3.major.events.forEach((e) => {
         if (e.level == null || !e.src || e.src.ts == null || e.src.ts >= e.ts) return;
         if (line([{ time: e.src.ts, value: e.level }, { time: e.ts, value: e.level }], e.type.startsWith("CHoCH") ? css("--s2") : e.type.startsWith("BOS") ? css("--s-violet") : "#9aa4af",
@@ -436,11 +447,16 @@
           ${e.scale_conflict ? `<tr><td>SCALE_CONFLICT</td><td>${esc(e.scale_conflict.text)}</td></tr>` : ""}
           ${e.gap ? `<tr><td>Данные</td><td>свеча после пропуска</td></tr>` : ""}</table></div>`;
       });
-      [...v3.major.swings, ...v3.internal.swings].filter((w) => w.ts === time).forEach((w) => {
-        h += `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">Swing ${w.scope === "major" ? (w.tier === "major" ? "MAJOR" : "major-масштаба (intermediate)") : "internal"}: ${w.kind} ${esc(w.label || "")}</div><table>
-          <tr><td>Цена</td><td>${fmt.price(w.price)}</td></tr><tr><td>Экстремум</td><td>${fmt.dt(w.ts)}</td></tr>
-          <tr><td>Подтверждён (известно)</td><td>${fmt.dt(w.confirmed_ts)}</td></tr>
-          <tr><td>Роль</td><td>${(w.roles || []).map((r) => `${esc(r.role)} · с ${fmt.dt(r.assigned_ts)}`).join("<br>") || (w.tier === "intermediate" ? "внутри major-диапазона — без major-роли" : "—")}</td></tr></table></div>`;
+      const onv = (k) => document.querySelector(`#t-${tf} [data-ov="${k}"]`)?.checked;
+      [...v3.major.swings.filter((w) => (w.tier === "major" && onv("mswing")) || (w.tier === "intermediate" && onv("iswing_mid"))),
+       ...v3.internal.swings.filter(() => onv("iswing"))].filter((w) => w.ts === time).forEach((w) => {
+        const major = w.scope === "major" && w.tier === "major";
+        h += `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">Swing ${major ? "MAJOR" : w.scope === "major" ? "intermediate (major-ZigZag, внутри major-диапазона)" : "internal"}: ${w.kind} ${esc(major ? (w.major_label || "") : (w.label || ""))}</div><table>
+          <tr><td>Цена</td><td>${fmt.price(w.price)}</td></tr><tr><td>Экстремум</td><td>${fmt.dt(w.ts)} <span class="muted">(отображается ретроспективно)</span></td></tr>
+          <tr><td>Подтверждён ZigZag</td><td>${fmt.dt(w.confirmed_ts)}</td></tr>
+          ${major ? `<tr><td>Доступен как major</td><td>${fmt.dt(w.available_ts)}</td></tr>` : ""}
+          <tr><td>Роль</td><td>${(w.roles || []).map((r) => `${esc(r.role)} · с ${fmt.dt(r.assigned_ts)}`).join("<br>") || (w.tier === "intermediate" ? "внутри major-диапазона — без major-роли" : "—")}</td></tr>
+          ${major && w.role_basis ? `<tr><td>Обоснование</td><td>${w.role_basis.map(esc).join("<br>")}</td></tr>` : ""}</table></div>`;
       });
     }
     const v2 = (T[tf].data?.trader?.analysis?.structure || T[tf].data?.preview?.structure || {}).v2;

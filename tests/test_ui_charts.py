@@ -201,3 +201,73 @@ def test_v3_layer_toggles_tooltip_and_five_tables(struct_ui):
     tab = struct_ui["tab"]
     assert all(tab["tables"]) and "Major Trend" in tab["panel"] and "Protected High" in tab["panel"] and "Старший ТФ" in tab["panel"]
     assert struct_ui["errs"] == []
+
+
+@pytest.fixture(scope="module")
+def major_ui(tmp_path_factory):
+    ne = _node_env()
+    if ne is None:
+        pytest.skip("Node.js + Playwright не установлены — UI-тест пропущен")
+    import uvicorn
+    from tradinglab.web.app import create_app
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(create_app(tmp_path_factory.mktemp("mj")), host="127.0.0.1", port=port, log_level="error"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.1)
+    try:
+        r = subprocess.run([ne[0], str(SCRIPT.parent / "major_layers_check.js"), f"http://127.0.0.1:{port}/"], env=ne[1], capture_output=True, text=True, timeout=180)
+    finally:
+        srv.should_exit = True
+        th.join(10)
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    if "fatal" in out and "Executable doesn't exist" in out["fatal"]:
+        pytest.skip("браузер Playwright не установлен")
+    assert "fatal" not in out, out
+    return out
+
+
+def test_major_on_intermediate_off_shows_only_core_major_points(major_ui):
+    d = major_ui["def"]
+    assert d["toggles"]["mswing"] and not d["toggles"]["iswing_mid"] and not d["toggles"]["iswing"] and not d["toggles"]["ievents"]
+    maj = [w for w in d["api"] if w["tier"] == "major"]
+    inter = [w for w in d["api"] if w["tier"] == "intermediate"]
+    assert len(maj) == 4 and len(inter) > 10
+    assert d["major"] == [[w["ts"], w["price"]] for w in maj]                    # линия: major → major, без промежуточных
+    inter_ts = {w["ts"] for w in inter}
+    assert not inter_ts & {p[0] for p in d["major"]}
+    mk = [m for m in d["markers"] if m[1].endswith("· major")]
+    assert sorted(m[0] for m in mk) == sorted(w["ts"] for w in maj)
+    assert not any(m[1].startswith("int·") or m[0] in inter_ts and "major" in m[1] for m in d["markers"])
+    assert d["inter"] is None and d["internal"] is None
+    # FABLES 1H: исходная структура по ролям ядра — LL 21.10 (0.05126) → LH 0.07975 → LL 0.04024
+    seq = [(w["label"], round(w["price"], 5)) for w in maj]
+    assert seq[1:] == [("", 0.05126), ("LH", 0.07975), ("LL", 0.04024)]
+    for w in maj:                                                               # не раньше подтверждения и назначения роли
+        assert w["avail"] >= w["conf"] and w["avail"] >= min(r["assigned_ts"] for r in w["roles"])
+
+
+def test_intermediate_and_internal_layers_are_separate_and_independent(major_ui):
+    m, a, io, back = major_ui["mid"], major_ui["allint"], major_ui["intOnly"], major_ui["back"]
+    inter = [w for w in m["api"] if w["tier"] == "intermediate"]
+    assert m["inter"] == [[w["ts"], w["price"]] for w in m["api"]]             # пунктир по полному major-ZigZag, отдельной серией
+    assert sorted(x[0] for x in m["markers"] if x[1].startswith("int·")) == sorted(w["ts"] for w in inter)
+    assert m["major"] == major_ui["def"]["major"]                              # главная линия не изменилась
+    assert a["internal"] == [list(x) for x in a["apiInt"]] and a["major"] == major_ui["def"]["major"]
+    assert io["inter"] is None and io["internal"] is not None and io["major"] == major_ui["def"]["major"]
+    assert back["major"] == major_ui["def"]["major"] and back["inter"] is None and back["internal"] is None
+    assert sorted(back["markers"]) == sorted(major_ui["def"]["markers"])
+
+
+def test_zoom_keeps_markup_and_tooltip_shows_availability(major_ui):
+    z = major_ui["zoom"]
+    assert z["major"] == major_ui["def"]["major"] and sorted(z["markers"]) == sorted(major_ui["def"]["markers"])
+    t = major_ui["tip"].lower()
+    for s in ("swing major", "подтверждён zigzag", "доступен как major", "protected high", "обоснование", "ретроспективно"):
+        assert s in t, s
+    assert major_ui["errs"] == []
