@@ -30,8 +30,9 @@
         <div class="chart-col">
           <div class="chart-tools" data-f="tools">
             ${[["ema", "EMA", "--s1"], ["bb", "Bollinger", "--text-muted"], ["vol", "Объём", "--text-muted"], ["levels", "Уровни S/R", "--text-secondary"],
-               ["fib", "Fibonacci", "--s4"], ["struct", "Структура", "--s-violet"], ["div", "Дивергенции", "--up"], ["trades", "Сделки", "--text-primary"]]
-              .map(([k, n, c]) => `<label><input type="checkbox" data-ov="${k}" ${k === "fib" ? "" : "checked"}><span class="legend-dot" style="background:var(${c})"></span>${n}</label>`).join("")}
+               ["fib", "Fibonacci", "--s4"], ["struct", "BOS/CHoCH · внешняя swing v2", "--s-violet"], ["istruct", "iBOS/iCHoCH · внутренняя v1 (S2)", "--text-muted"],
+               ["div", "Дивергенции", "--up"], ["trades", "Сделки", "--text-primary"]]
+              .map(([k, n, c]) => `<label><input type="checkbox" data-ov="${k}" ${k === "fib" || k === "istruct" ? "" : "checked"}><span class="legend-dot" style="background:var(${c})"></span>${n}</label>`).join("")}
             <label title="панель RSI(14) из аналитического ядра"><input type="checkbox" data-osc="rsi" ${rsiOn() ? "checked" : ""}><span class="legend-dot" style="background:var(--accent)"></span>RSI</label>
             <span class="spacer"></span><span class="muted">UTC · панели: RSI · MACD · MFI · CMF · OBV</span>
           </div>
@@ -229,8 +230,13 @@
     if (on("trades")) (tr?.ops || []).forEach((o) => marks.push(o.side === "BUY"
       ? { time: o.ts, position: "belowBar", color: css("--up"), shape: "arrowUp", text: "BUY" }
       : { time: o.ts, position: "aboveBar", color: css("--down"), shape: "arrowDown", text: o.reason.startsWith("цель") ? "T1" : o.reason.startsWith("стоп") ? "STOP" : "SELL" }));
-    if (on("struct")) (st.events || []).slice(-12).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
-      color: css("--s-violet"), shape: "circle", size: 0.6, text: e.type.replace("_UP", "↑").replace("_DOWN", "↓") }));
+    const lab = (x) => x.replace("_UP", "↑").replace("_DOWN", "↓");
+    if (st.v2) {
+      if (on("struct")) st.v2.external.forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
+        color: e.type.startsWith("CHoCH") ? css("--s2") : css("--s-violet"), shape: "circle", size: 0.8, text: lab(e.type) }));
+      if (on("istruct")) st.v2.internal.slice(-30).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
+        color: "#8b949e", shape: "circle", size: 0.4, text: lab(e.type) }));
+    }
     liveBars(d).forEach((b) => marks.push({ time: b.time, position: "aboveBar", color: css("--text-secondary"), shape: "square", size: 0.5,
       text: b.status === "FORMING" ? "FORMING" : "закрыта · ждёт GT" }));
     marks.sort((a, b) => a.time - b.time);
@@ -258,7 +264,7 @@
     [s.bbU, s.bbM, s.bbL].forEach((x) => x.applyOptions({ visible: on("bb") }));
     s.vol.applyOptions({ visible: on("vol") });
     t.lines.forEach((l) => s.candle.removePriceLine(l)); t.lines = [];
-    t.extra.forEach((x) => t.chart.removeSeries(x)); t.extra = [];
+    t.extra.forEach((x) => t.chart.removeSeries(x)); t.extra = []; t.structSegs = [];
     const tr = d.trader, st = tr?.analysis?.structure || d.preview?.structure || {};
     const pl = (price, color, title, style = LW.LineStyle.Dashed, w = 1) =>
       t.lines.push(s.candle.createPriceLine({ price, color, lineWidth: w, lineStyle: style, axisLabelVisible: true, title }));
@@ -269,6 +275,21 @@
     if (on("fib") && st.fib) {
       ["0.382", "0.5", "0.618"].forEach((r) => pl(st.fib.retracement[r], css("--s4"), `Fib ${r}`, LW.LineStyle.Dotted));
       pl(st.fib.extension["1.618"], css("--s4"), "Ext 1.618", LW.LineStyle.Dotted);
+    }
+    const v2 = st.v2;
+    if (v2) {
+      const seg = (e, color, width, style) => {
+        if (e.pivot.ts >= e.ts) return;
+        const x = t.chart.addSeries(LW.LineSeries, { color, lineWidth: width, lineStyle: style, priceLineVisible: false, lastValueVisible: false,
+          crosshairMarkerVisible: false, pointMarkersVisible: false, priceFormat: { type: "price", precision: 6, minMove: 0.000001 } }, 0);
+        x.setData([{ time: e.pivot.ts, value: e.level }, { time: e.ts, value: e.level }]);   // от пробитого pivot до свечи пробоя
+        t.extra.push(x); t.structSegs.push(x);
+      };
+      if (on("struct")) {
+        v2.external.forEach((e) => seg(e, e.type.startsWith("CHoCH") ? css("--s2") : css("--s-violet"), e.type.startsWith("CHoCH") ? 2 : 1, LW.LineStyle.Solid));
+        if (v2.protected != null) pl(v2.protected, css("--s-violet"), `Protected ${v2.trend === "up" ? "L" : v2.trend === "down" ? "H" : ""}`, LW.LineStyle.Dashed);
+      }
+      if (on("istruct")) v2.internal.slice(-30).forEach((e) => seg(e, "#6e7783", 1, LW.LineStyle.Dotted));
     }
     const pos = tr?.position;
     if (pos) {
@@ -338,6 +359,15 @@
     if (live && r == null && v("macd_hist") == null) h += `<div class="muted">Значения индикаторов этой свечи появятся после получения закрытой свечи GeckoTerminal.</div>`;
     else if (live) h += `<div class="muted">${status === "CLOSING" ? "Предварительные значения по котировкам — окончательные после свечи GeckoTerminal" :
       "LIVE-значения — по формирующейся свече"}; стратегиями не используются. В скобках — по последней закрытой свече.</div>`;
+    const v2 = (T[tf].data?.trader?.analysis?.structure || T[tf].data?.preview?.structure || {}).v2;
+    const evs = v2 ? [...v2.external, ...v2.internal].filter((e) => e.ts === time) : [];
+    h += evs.map((e) => `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">${e.scope === "external" ? "Внешняя swing-структура v2 (исследование)" : "Внутренняя структура v1 (iBOS/iCHoCH, используется S2)"}: ${esc(e.type)}${e.initial ? " (начальный)" : ""}</div><table>
+        <tr><td>Пробой</td><td>свеча ${fmt.dt(e.ts)} · close ${fmt.price(e.close)}</td></tr>
+        <tr><td>Сигнал известен</td><td>${fmt.dt(e.known_ts)} (закрытие свечи пробоя)</td></tr>
+        <tr><td>Пробитый уровень</td><td>${fmt.price(e.level)} — ${e.pivot.kind === "H" ? "swing high" : "swing low"}${e.pivot.label ? " " + esc(e.pivot.label) : ""} от ${fmt.dt(e.pivot.ts)}</td></tr>
+        <tr><td>Подтверждение pivot</td><td>${e.pivot.label === "protected" ? "protected установлен" : "свеча"} ${fmt.dt(e.pivot.confirmed_ts)} · известно ${fmt.dt(e.pivot.known_ts)}</td></tr>
+        <tr><td>Предыдущая структура</td><td>${{ up: "вверх", down: "вниз", none: "не определена" }[e.prev_trend]}</td></tr>
+        ${e.protected_after != null ? `<tr><td>Protected после</td><td>${fmt.price(e.protected_after)}</td></tr>` : ""}</table></div>`).join("");
     const ops = (T[tf].data?.trader?.ops || []).filter((o) => o.ts === time);
     h += ops.map((o) => `<div class="tsec"><div class="th"><span class="side-b ${o.side === "BUY" ? "buy" : "sell"}">${o.side}</span> · ${fmt.dt(o.ts)}</div><table>
         <tr><td>Цена исп.</td><td>${fmt.price(Number(o.price))} (mid ${fmt.price(Number(o.mid))})</td></tr>
@@ -638,7 +668,16 @@
       <div class="muted" style="margin-top:6px">Значения на закрытии ${fmt.dt(an.as_of_ts)}. Индикатор без достаточной истории не рассчитывается и не используется стратегией.</div>`;
 
     const divs = (st.divergences || []).slice().reverse();
-    body("struct").innerHTML = `<div class="grid2">
+    const v2 = st.v2;
+    const evRows = v2 ? [...v2.external, ...v2.internal].sort((x, y) => y.ts - x.ts || (x.scope === "external" ? -1 : 1)).slice(0, 40)
+      .map((e) => `<tr><td><b class="${e.type.endsWith("UP") ? "pos" : "neg"}">${esc(e.type)}</b>${e.initial ? " (нач.)" : ""}</td><td>${e.scope === "external" ? "внешняя v2" : "внутренняя v1"}</td>
+        <td>${fmt.dt(e.ts)}<br><span class="muted">известно ${fmt.time(e.known_ts)}</span></td><td>${e.pivot.kind}${e.pivot.label ? " " + esc(e.pivot.label) : ""} @ ${fmt.time(e.pivot.ts)}</td><td class="n">${fmt.price(e.level)}</td>
+        <td class="n">${fmt.price(e.close)}</td><td>${fmt.time(e.pivot.confirmed_ts)}</td><td>${{ up: "вверх", down: "вниз", none: "—" }[e.prev_trend]}</td></tr>`).join("") : "";
+    const v2Html = v2 ? `<div class="box" style="margin-bottom:12px"><h4>События структуры: BOS/CHoCH — внешняя swing v2 (ATR-zigzag, k=${v2.k_atr} — исследовательский параметр); iBOS/iCHoCH — внутренняя v1 (используется S2)</h4>
+      <div class="sec" style="margin-bottom:6px">Внешний тренд: <b>${{ up: "вверх", down: "вниз", none: "не определён" }[v2.trend]}</b>${v2.protected != null ? ` · protected ${v2.trend === "up" ? "low" : "high"} ${fmt.price(v2.protected)}${v2.protected_src ? " (" + fmt.dt(v2.protected_src.ts) + ")" : ""}` : ""}.
+        ${esc(v2.note)}</div>
+      <table class="t"><tr><th>Тип</th><th>Масштаб</th><th>Пробой (close)</th><th>Пробитый pivot</th><th>Уровень</th><th>Close</th><th>Pivot подтверждён</th><th>Пред. структура</th></tr>${evRows || "<tr><td colspan=8 class='muted'>нет</td></tr>"}</table></div>` : "";
+    body("struct").innerHTML = v2Html + `<div class="grid2">
       <div class="box"><h4>Swing-структура</h4><table class="t"><tr><th>Метка</th><th>Время</th><th>Цена</th><th>Подтверждён</th></tr>
         ${(st.swings || []).slice().reverse().map((x) => `<tr><td>${x.label}</td><td>${fmt.time(x.ts)}</td><td class="n">${fmt.price(x.price)}</td><td class="n">бар ${x.confirmed_idx}</td></tr>`).join("") || "<tr><td colspan=4 class='muted'>нет</td></tr>"}</table>
         <h4 style="margin-top:10px">События структуры (BOS / CHoCH)</h4><table class="t"><tr><th>Тип</th><th>Время</th><th>Уровень</th></tr>

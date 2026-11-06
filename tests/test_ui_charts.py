@@ -146,3 +146,57 @@ def test_mobile_fixed_bar_values_block(live_ui):
     m = live_ui["mob"]
     assert m["barinfo"] == "block" and m["tip"] != "block" and "MACD" in m["text"] and m["sw"] <= m["cw"]
     assert live_ui["errs"] == []
+
+
+@pytest.fixture(scope="module")
+def struct_ui(tmp_path_factory):
+    ne = _node_env()
+    if ne is None:
+        pytest.skip("Node.js + Playwright не установлены — UI-тест пропущен")
+    import uvicorn
+    from tradinglab.web.app import create_app
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(create_app(tmp_path_factory.mktemp("st")), host="127.0.0.1", port=port, log_level="error"))
+    th = threading.Thread(target=srv.run, daemon=True)
+    th.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.1)
+    try:
+        r = subprocess.run([ne[0], str(SCRIPT.parent / "structure_check.js"), f"http://127.0.0.1:{port}/"], env=ne[1], capture_output=True, text=True, timeout=180)
+    finally:
+        srv.should_exit = True
+        th.join(10)
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    if "fatal" in out and "Executable doesn't exist" in out["fatal"]:
+        pytest.skip("браузер Playwright не установлен")
+    assert "fatal" not in out, out
+    return out
+
+
+@pytest.mark.parametrize("tf", ["1h", "4h", "1d"])
+def test_structure_segments_go_from_broken_pivot_to_break_candle(struct_ui, tf):
+    x = struct_ui["res"][tf]["off"]                       # по умолчанию: только внешняя (swing) структура
+    want = [[[e["pts"], e["level"]], [e["ts"], e["level"]]] for e in x["ext"] if e["pts"] < e["ts"]]
+    assert x["segs"] == want
+    lab = lambda e: e["type"].replace("_UP", "↑").replace("_DOWN", "↓")   # noqa: E731
+    assert all([e["ts"], lab(e)] in x["markers"] for e in x["ext"])
+    assert not any(m[1].startswith("i") for m in x["markers"])
+    assert bool(x["prot"]) == (x["protected"] is not None)
+
+
+def test_internal_structure_toggle_and_tooltip(struct_ui):
+    on, off = struct_ui["res"]["1h"]["on"], struct_ui["res"]["1h"]["off"]
+    assert len(on["segs"]) == len(off["segs"]) + sum(1 for e in on["int"] if e["pts"] < e["ts"])
+    assert any(m[1].startswith("iBOS") or m[1].startswith("iCHoCH") for m in on["markers"])
+    t = struct_ui["tip"]
+    assert t["shown"] == "block"
+    for s in ("Пробой", "Сигнал известен", "Пробитый уровень", "Подтверждение", "Предыдущая структура"):
+        assert s in t["text"], s
+    assert struct_ui["ev"]["type"].split("_")[0].lstrip("i") in t["text"]
+    assert ("внешняя swing-структура v2" in t["text"].lower()) or ("внутренняя структура v1" in t["text"].lower())
+    assert any("внешняя swing v2" in x for x in struct_ui["toggles"]) and any("внутренняя v1" in x for x in struct_ui["toggles"])
+    assert struct_ui["table"] and struct_ui["errs"] == []

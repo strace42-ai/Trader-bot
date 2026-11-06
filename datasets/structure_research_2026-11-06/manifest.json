@@ -1,0 +1,9 @@
+{
+ "id": "structure_research_2026-11-06",
+ "recorded_at": "2026-11-06T02:07:51Z",
+ "files": {
+  "fables_gt_live.json": "GeckoTerminal OHLCV FABLES/USDG 1H/4H/1D (ключ rows[tf], поле fetched_at)",
+  "cg_eth_btc_ohlc_30d.json": "CoinGecko /coins/{id}/ohlc?days=30: ETH и BTC, 4H-свечи [ms закрытия, o, h, l, c], без объёма"
+ },
+ "purpose": "исследование структурного анализа v2 (не используется торговыми стратегиями)"
+}
