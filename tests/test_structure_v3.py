@@ -230,7 +230,9 @@ def test_terminal_payload_and_htf_undefined_gives_no_confirmation(tmp_path):
     c = TestClient(create_app(tmp_path), base_url="http://127.0.0.1:8770")
     d = c.get("/api/terminal/1h?mode=BACKTEST").json()["structure_v3"]
     assert d["version"] == S.VERSION and d["major"]["state"]["trend"] == "DOWN"
-    assert d["htf"]["tf"] == "4h" and not d["htf"]["conflict"] and "не определён" in d["htf"]["text"]
+    assert d["htf"]["tf"] == "4h" and not d["htf"]["conflict"] and d["htf"]["text"].startswith("4H DOWN")     # 4H определён (с запуска)
+    d1 = c.get("/api/terminal/4h?mode=BACKTEST").json()["structure_v3"]
+    assert "не определён" in d1["htf"]["text"] and not d1["htf"]["conflict"]                                      # 1D UNDEFINED — без подтверждения
     for k in ("timeline", "range", "scale_conflicts", "conditions", "senior", "internal"):
         assert k in d
 
@@ -248,3 +250,98 @@ def test_l1_incomplete_history_and_l2_intrabar_flag(fab):
     assert late["major"]["state"]["trend"] == "DOWN" and late["history_status"] == "INCOMPLETE_HISTORY"   # не выдаётся как достоверное
     short = S.Engine("1h", history="truncated").run(Series("1h", fab.candles[:10])).result()
     assert short["history_status"] == "INSUFFICIENT_HISTORY" and short["major"]["state"]["trend"] == "UNDEFINED"
+
+
+
+# ------------------------------------------------------------------ 4H: инициализация после свечи запуска
+@pytest.fixture(scope="module")
+def fab4():
+    d = json.loads((ROOT / "datasets/structure_v3_2026-11-06/fables_gt_full.json").read_text())
+    return normalize(d["rows"]["4h"], "4h", d["fetched_at"]), normalize(d["rows"]["1d"], "1d", d["fetched_at"])
+
+
+def test_4h_recognises_launch_sequence_independently(fab4):
+    s4, _ = fab4
+    r = S.Engine("4h", history="launch").run(s4).result()
+    m = r["major"]
+    maj = [(w["kind"], round(w["price"], 5)) for w in m["swings"] if w["tier"] == "major"]
+    assert maj == [("H", 0.14502), ("L", 0.05126), ("H", 0.07975), ("L", 0.04024)]
+    bos = [x for x in m["events"] if x["type"] == "BOS_DOWN"]
+    assert len(bos) == 1 and bos[0]["ts"] == ts("2026-10-24T00:00") and bos[0]["known_ts"] == ts("2026-10-24T04:00")
+    assert m["state"]["trend"] == "DOWN" and m["state"]["ph"] == pytest.approx(0.0797450739, rel=1e-6)
+    for w in m["swings"]:                                         # роль не раньше подтверждения
+        for x in w["roles"]:
+            assert x["assigned_ts"] >= w["confirmed_ts"] or x["role"].startswith("protected")
+
+
+def test_4h_cause_launch_candle_inflates_atr_without_launch_mode(fab4):
+    """Без пометки «история с запуска» первая 4H-свеча (аукцион, TR 0.080 ≈ 6–20× последующих) завышает ATR на весь
+    прогрев: L 0.05126 не подтверждается до обновления минимума, 4H остаётся UNDEFINED. Пометка исключает только эту
+    свечу из начальной оценки ATR."""
+    s4, _ = fab4
+    e = S.Engine("4h").run(s4)
+    assert [round(w.price, 5) for w in e.zz["major"].swings[:2]] == [0.14502, 0.04024] and e.major.trend == "UNDEFINED"
+    el = S.Engine("4h", history="launch").run(s4)
+    first = next(i for i, v in enumerate(el.vol) if v)
+    assert first == S.ATR_N and el.vol[first] == pytest.approx(sum(el.tr[1:S.ATR_N + 1]) / S.ATR_N)
+
+
+def test_4h_launch_mode_has_no_lookahead(fab4):
+    s4, _ = fab4
+    full = S.Engine("4h", history="launch").run(s4)
+    inc = S.Engine("4h", history="launch")
+    for n, k in enumerate(s4.candles, 1):
+        inc.step(k)
+        if n in (10, 16, 20, 30, 60, len(s4)):
+            assert inc.states() == full.states()[:n] and inc.major.events == [x for x in full.major.events if x["idx"] < n]
+    st = json.loads(json.dumps(S.Engine("4h", history="launch").run(Series("4h", s4.candles[:18])).to_state()))
+    b = S.Engine.from_state(st)
+    for k in s4.candles[18:]:
+        b.step(k)
+    assert b.states() == full.states()
+
+
+def test_1h_unchanged_by_launch_mode_and_1d_objectively_undefined(fab, fab4):
+    a = S.Engine("1h", history="launch").run(fab).result()["major"]
+    b = S.Engine("1h").run(fab).result()["major"]
+    assert [(x["type"], x["ts"]) for x in a["events"]] == [(x["type"], x["ts"]) for x in b["events"]]
+    assert a["state"]["ph"] == b["state"]["ph"]
+    _, s1d = fab4
+    d = S.Engine("1d", history="launch").run(s1d).result()
+    assert d["major"]["state"]["trend"] == "UNDEFINED" and sum(1 for w in d["major"]["swings"] if w["tier"] == "major") <= 1
+
+
+def _launch_path(seed, scale):
+    rnd = random.Random(seed)
+    pts = [(0.75, 0), (0.62, 3), (0.80, 25), (0.66, 45), (0.72, 52), (0.50, 75), (0.62, 100), (0.55, 132)]
+    out, p, t = [Candle(0, 1.0, 1.6, 0.74, 0.75, 1)], 0.75, 1
+    for (a, ia), (b, ib) in zip(pts, pts[1:]):
+        n = (ib - ia) * scale
+        for q in range(n):
+            c = (a + (b - a) * (q + 1) / n) * math.exp(rnd.gauss(0, 0.006))
+            out.append(Candle(t * 3600, p, max(p, c) * math.exp(abs(rnd.gauss(0, 0.004))), min(p, c) * math.exp(-abs(rnd.gauss(0, 0.004))), c, 1))
+            p, t = c, t + 1
+    return Series("1h", out)
+
+
+def test_young_asset_launch_scenario_on_1h_and_4h():
+    """Если первый минимум в другой 4H-свече, чем аукцион запуска, 4H распознаёт LL→LH→LL самостоятельно; если в той же
+    свече — порядок внутри свечи неизвестен, и 4H объективно не может их разделить (ограничение, а не ошибка)."""
+    for seed in range(1, 6):
+        for tf in ("1h", "4h"):
+            s1 = _launch_path(seed, 2)
+            s = s1 if tf == "1h" else S.aggregate(s1, "4h")
+            m = S.Engine(tf, history="launch").run(s).result()["major"]
+            ph = next(p["price"] for p in m["protected_history"] if p["side"] == "H")
+            assert abs(ph - 0.80) < 0.03 and m["state"]["trend"] == "DOWN", (seed, tf)
+
+
+def test_ltf_major_comparison_payload_is_separate(tmp_path):
+    from fastapi.testclient import TestClient
+    from tradinglab.web.app import create_app
+    c = TestClient(create_app(tmp_path), base_url="http://127.0.0.1:8770")
+    d4 = c.get("/api/terminal/4h?mode=BACKTEST").json()["structure_v3"]
+    d1 = c.get("/api/terminal/1h?mode=BACKTEST").json()["structure_v3"]
+    assert d1["ltf_major"] is None and d4["ltf_major"]["tf"] == "1h" and "сравнение" in d4["ltf_major"]["note"]
+    assert [(w["ts"], w["price"]) for w in d4["ltf_major"]["swings"]] == [(w["ts"], w["price"]) for w in d1["major"]["swings"] if w["tier"] == "major"]
+    assert d4["major"]["events"] and all(e["scope"] == "major" for e in d4["major"]["events"])   # сигналы 4H — свои

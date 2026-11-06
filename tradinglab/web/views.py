@@ -176,7 +176,24 @@ def _annotate_major_swings(m: dict, r: dict) -> None:
         w["role_basis"] = basis
 
 
-def structure_v3_payload(s, htf_s=None) -> dict:
+LTF_OF = {"1h": None, "4h": "1h", "1d": "4h"}
+
+
+def ltf_major_payload(ltf_s) -> dict | None:
+    """Major-структура МЛАДШЕГО ТФ для визуального сравнения на старшем графике. Считается отдельно на свечах младшего
+    ТФ; это НЕ сигналы и НЕ состояние модели старшего ТФ."""
+    from .. import structure_v3 as S3
+    if ltf_s is None or not len(ltf_s):
+        return None
+    r = S3.Engine(ltf_s.tf, history=_history(ltf_s)).run(ltf_s).result()
+    m = r["major"]
+    _annotate_major_swings(m, r)
+    return {"tf": ltf_s.tf, "swings": [w for w in m["swings"] if w["tier"] == "major"],
+            "protected_history": m["protected_history"], "state": m["state"], "history_status": r["history_status"],
+            "note": f"{ltf_s.tf.upper()} Major Structure — сравнение. Не сигналы и не состояние модели этого таймфрейма."}
+
+
+def structure_v3_payload(s, htf_s=None, ltf_s=None) -> dict:
     """Структура v3 (исследование и визуализация; стратегиями не используется). s — закрытые свечи ТФ,
     htf_s — закрытые свечи старшего ТФ (контекст: при UNDEFINED подтверждения не даёт)."""
     from .. import structure_v3 as S3
@@ -213,7 +230,7 @@ def structure_v3_payload(s, htf_s=None) -> dict:
         t = e.major.target(e, kind, len(e.ts))
         if t:
             rng["structural_high" if kind == "H" else "structural_low"] = t
-    return {**r, "timeline": tl, "htf": htf, "range": rng,
+    return {**r, "timeline": tl, "htf": htf, "range": rng, "ltf_major": ltf_major_payload(ltf_s),
             "note": "Структура v3 — ИССЛЕДОВАНИЕ и визуализация: торговыми стратегиями не используется. Major: правила S1/S2 "
                     "(вложенность в major-диапазон; protected — экстремум между пробитой major-границей и пробоем); нарушение "
                     "protected — по тени (CHoCH ≠ подтверждение). SCALE_CONFLICT — расхождение со старшим масштабом "

@@ -271,3 +271,14 @@ def test_zoom_keeps_markup_and_tooltip_shows_availability(major_ui):
     for s in ("swing major", "подтверждён zigzag", "доступен как major", "protected high", "обоснование", "ретроспективно"):
         assert s in t, s
     assert major_ui["errs"] == []
+
+
+
+def test_4h_own_major_and_optional_1h_comparison_layer(major_ui):
+    off, on = major_ui["h4off"], major_ui["h4on"]
+    assert off["tog"] and not off["on"] and not off["has1hToggle"] and "1H Major (сравнение)" in off["label"]
+    assert off["ltf"] is None and not any("(сравн.)" in m for m in off["markers"])
+    assert [round(p[1], 5) for p in off["api4"]] == [0.14502, 0.05126, 0.07975, 0.04024]     # собственная 4H-модель
+    assert off["major"] == off["api4"]
+    assert on["ltf"] == on["api"] and on["major"] == off["major"]                             # отдельная серия, 4H major не меняется
+    assert sum(1 for m in on["markers"] if "(сравн.)" in m) == len(on["api"])

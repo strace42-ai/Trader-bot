@@ -7,7 +7,8 @@
   const TFS = ["1h", "4h", "1d"];
   const TITLES = { "1h": "TRADER 1H", "4h": "TRADER 4H", "1d": "TRADER 1D" };
   const TF_DT = { "1h": 3600, "4h": 14400, "1d": 86400 };
-  const OV_OFF = new Set(["fib", "ievents", "iswing", "iswing_mid", "legacy"]);   // слои, выключенные по умолчанию (читаемость)
+  const OV_OFF = new Set(["fib", "ievents", "iswing", "iswing_mid", "legacy", "ltfmajor"]);
+  const LTF_OF = { "1h": null, "4h": "1h", "1d": "4h" };   // слои, выключенные по умолчанию (читаемость)
   const TABS = [["overview", "Обзор"], ["ind", "Индикаторы"], ["struct", "Структура"], ["onchain", "Ончейн"], ["dec", "Решения"], ["audit", "Аудит индикаторов"], ["diag", "Диагностика"]];
   const MOBILE = () => window.matchMedia("(max-width: 640px), (hover: none)").matches;
   const OSC = ["rsi", "macd", "mfi", "cmf", "obv"];          // панели осцилляторов сверху вниз (значения — из ядра)
@@ -36,6 +37,7 @@
                ["mswing", "Major swings v3", "--s-violet"], ["iswing_mid", "Intermediate swings", "--text-secondary"], ["mevents", "Major BOS/CHoCH v3", "--s2"], ["prot", "Protected v3", "--down"],
                ["ievents", "iBOS/iCHoCH v3 (internal)", "--text-muted"], ["iswing", "Локальные swing", "--text-muted"], ["phase", "Фаза и диапазон", "--s4"],
                ["legacy", "Legacy v1/v2", "--text-muted"],
+               ...(LTF_OF[tf] ? [["ltfmajor", `${LTF_OF[tf].toUpperCase()} Major (сравнение)`, "--warn"]] : []),
                ["div", "Дивергенции", "--up"], ["trades", "Сделки", "--text-primary"]]
               .map(([k, n, c]) => `<label><input type="checkbox" data-ov="${k}" ${OV_OFF.has(k) ? "" : "checked"}><span class="legend-dot" style="background:var(${c})"></span>${n}</label>`).join("")}
             <label title="панель RSI(14) из аналитического ядра"><input type="checkbox" data-osc="rsi" ${rsiOn() ? "checked" : ""}><span class="legend-dot" style="background:var(--accent)"></span>RSI</label>
@@ -230,7 +232,7 @@
 
   function buildMarkers(tf) {
     const t = T[tf], d = t.data, tr = d.trader, st = tr?.analysis?.structure || d.preview?.structure || {};
-    const on = (k) => document.querySelector(`#t-${tf} [data-ov="${k}"]`).checked;
+    const on = (k) => !!document.querySelector(`#t-${tf} [data-ov="${k}"]`)?.checked;
     const marks = [];
     if (on("trades")) (tr?.ops || []).forEach((o) => marks.push(o.side === "BUY"
       ? { time: o.ts, position: "belowBar", color: css("--up"), shape: "arrowUp", text: "BUY" }
@@ -241,6 +243,9 @@
       // major: только точки со структурной ролью ядра (tier === "major"); intermediate — отдельный слой
       if (on("mswing")) v3.major.swings.filter((w) => w.tier === "major").forEach((w) => marks.push({ time: w.ts, position: w.kind === "H" ? "aboveBar" : "belowBar",
         color: css("--s-violet"), shape: "circle", size: 0.8, text: (w.major_label || w.kind) + " · major" }));
+      // младший ТФ — только для сравнения: отдельный цвет и подпись, не сигналы этого ТФ
+      if (on("ltfmajor") && v3.ltf_major) v3.ltf_major.swings.forEach((w) => marks.push({ time: w.ts - (w.ts % TF_DT[tf]), position: w.kind === "H" ? "aboveBar" : "belowBar",
+        color: css("--warn"), shape: "circle", size: 0.4, text: `${v3.ltf_major.tf.toUpperCase()} ${w.major_label || w.kind} (сравн.)` }));
       if (on("iswing_mid")) v3.major.swings.filter((w) => w.tier === "intermediate").forEach((w) => marks.push({ time: w.ts, position: w.kind === "H" ? "aboveBar" : "belowBar",
         color: "#7d8590", shape: "circle", size: 0.25, text: "int·" + (w.label || w.kind) }));
       if (on("mevents")) v3.major.events.forEach((e) => marks.push({ time: e.ts, position: /UP|HIGH/.test(e.type) ? "aboveBar" : "belowBar",
@@ -281,7 +286,7 @@
   function applyOverlays(tf) {
     const t = T[tf], d = t.data, s = t.s;
     if (!d) return;
-    const on = (k) => document.querySelector(`#t-${tf} [data-ov="${k}"]`).checked;
+    const on = (k) => !!document.querySelector(`#t-${tf} [data-ov="${k}"]`)?.checked;
     s.emaF.applyOptions({ visible: on("ema") }); s.emaS.applyOptions({ visible: on("ema") });
     [s.bbU, s.bbM, s.bbL].forEach((x) => x.applyOptions({ visible: on("bb") }));
     s.vol.applyOptions({ visible: on("vol") });
@@ -316,6 +321,11 @@
       // главная линия — напрямую от одного major-экстремума к следующему, без промежуточных точек
       if (on("mswing")) { const x = line(v3.major.swings.filter((w) => w.tier === "major").map((w) => ({ time: w.ts, value: w.price })), css("--s-violet"), 2, LW.LineStyle.Solid);
         if (x) { t.v3lines.mswing++; t.v3series.major = x; } }
+      if (on("ltfmajor") && v3.ltf_major) {
+        const pts = v3.ltf_major.swings.map((w) => ({ time: w.ts - (w.ts % TF_DT[tf]), value: w.price }));   // точка на свече старшего ТФ, содержащей экстремум
+        const x = line(pts, css("--warn"), 1, LW.LineStyle.LargeDashed);
+        if (x) { t.v3lines.ltfmajor = 1; t.v3series.ltf = x; }
+      }
       // intermediate: тонкий пунктир по полному major-ZigZag (major + intermediate), отдельной серией
       if (on("iswing_mid")) { const x = line(v3.major.swings.map((w) => ({ time: w.ts, value: w.price })), "#7d8590", 1, LW.LineStyle.Dotted);
         if (x) { t.v3lines.iswing_mid++; t.v3series.inter = x; } }

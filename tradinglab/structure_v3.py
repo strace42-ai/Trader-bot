@@ -374,6 +374,7 @@ class Engine:
         начало ряда произвольное (L1)."""
         self.tf, self.dt = tf, TF_SEC[tf]
         self.history = history
+        self.launch_skip = 1 if history == "launch" else 0
         self.k = {"major": k_major, "internal": k_int, "senior": k_senior}
         self.ts, self.o, self.h, self.l, self.c = [], [], [], [], []
         self.vol: list[float | None] = []
@@ -398,10 +399,15 @@ class Engine:
         self.gap.append(bool(self.ts) and k.ts - self.ts[-1] > self.dt)
         self.ts.append(k.ts); self.o.append(k.o); self.h.append(k.h); self.l.append(k.l); self.c.append(k.c)
         self.tr.append(k.h - k.l if i == 0 else max(k.h, self.c[i - 1]) - min(k.l, self.c[i - 1]))
-        if i + 1 < ATR_N:
+        # Свеча запуска торгов (history="launch", индекс 0) не входит в начальную оценку ATR: у неё нет предыдущего
+        # закрытия, её диапазон — открывающий аукцион/поиск цены, а не торговая волатильность. Иначе на старших ТФ
+        # (4H: свеча запуска содержит несколько часов аукциона) ATR завышен в разы на весь прогрев, и ранние swing
+        # не подтверждаются. Решение по бару i по-прежнему использует только свечи ≤ i.
+        off = self.launch_skip
+        if i + 1 < ATR_N + off:
             self.vol.append(None)
-        elif i + 1 == ATR_N:
-            self.vol.append(sum(self.tr) / ATR_N)
+        elif i + 1 == ATR_N + off:
+            self.vol.append(sum(self.tr[off:]) / ATR_N)
         else:
             self.vol.append((self.vol[-1] * (ATR_N - 1) + self.tr[-1]) / ATR_N)
         # решения по бару i используют swings, подтверждённые на барах < i; затем ZigZag учитывает бар i

@@ -216,7 +216,9 @@ class Lab:
                                                   {"dataset": self.ds["id"], "experiment": self.bt["experiment"], "persist": self.persist,
                                                    "start_ts": self.bt["start_ts"]})
             h = views.HTF_OF[tf]
-            base["structure_v3"] = views.structure_v3_payload(a.s, self.an[h].s if h and h in self.an else None)
+            lt = views.LTF_OF[tf]
+            base["structure_v3"] = views.structure_v3_payload(a.s, self.an[h].s if h and h in self.an else None,
+                                                              self.an[lt].s if lt and lt in self.an else None)
             return base
         now = self.now()
         a = self.live_analysis(tf)
@@ -224,7 +226,10 @@ class Lab:
         base["live"] = self.live_block(tf, a) if a is not None else {"bars": [], "values": {"closed": None, "live": None}}
         h = views.HTF_OF[tf]
         ha = self.live_analysis(h) if h else None
-        base["structure_v3"] = views.structure_v3_payload(a.s if a is not None else None, ha.s if ha is not None else None)
+        lt = views.LTF_OF[tf]
+        la = self.live_analysis(lt) if lt else None
+        base["structure_v3"] = views.structure_v3_payload(a.s if a is not None else None, ha.s if ha is not None else None,
+                                                          la.s if la is not None else None)
         base["next_close"] = views.next_close(tf, now)
         base["next_available"] = base["next_close"] + GRACE_SEC
         r = self.runner()

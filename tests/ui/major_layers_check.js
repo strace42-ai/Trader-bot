@@ -43,6 +43,16 @@ const { chromium } = require("playwright");
     const r = await p.evaluate(() => { const q = document.querySelector("#t-1h [data-f=chart]").getBoundingClientRect(); return { x: q.x, y: q.y + window.scrollY, width: q.width, height: Math.min(q.height, 520) }; });
     await p.screenshot({ path: process.argv[3], clip: r, fullPage: true });
   }
+  // 4H: слой сравнения 1H Major — выключен по умолчанию, отдельная серия, не меняет 4H major
+  const s4 = () => p.evaluate(() => { const t = window.__lab["4h"], v = t.data.structure_v3;
+    return { tog: !!document.querySelector('#t-4h [data-ov="ltfmajor"]'), on: document.querySelector('#t-4h [data-ov="ltfmajor"]')?.checked,
+      label: document.querySelector('#t-4h [data-ov="ltfmajor"]')?.parentElement.textContent,
+      ltf: t.v3series.ltf ? t.v3series.ltf.data().map((q) => [q.time, q.value]) : null, major: t.v3series.major ? t.v3series.major.data().map((q) => [q.time, q.value]) : null,
+      api: v.ltf_major.swings.map((w) => [w.ts - (w.ts % 14400), w.price]), api4: v.major.swings.filter((w) => w.tier === "major").map((w) => [w.ts, w.price]),
+      markers: t.markers.markers().map((m) => m.text), has1hToggle: !!document.querySelector('#t-1h [data-ov="ltfmajor"]') }; });
+  out.h4off = await s4();
+  await p.click('#t-4h [data-ov="ltfmajor"]'); await p.waitForTimeout(300);
+  out.h4on = await s4();
   out.errs = errs;
   console.log(JSON.stringify(out));
   await b.close();
