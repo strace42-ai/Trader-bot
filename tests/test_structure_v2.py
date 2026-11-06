@@ -123,3 +123,47 @@ def test_terminal_payload_contains_v2_block(tmp_path):
     assert "events" in st and st["v2"]["version"] == SV2.VERSION
     for e in st["v2"]["external"] + st["v2"]["internal"]:
         assert {"type", "ts", "level", "close", "prev_trend", "pivot"} <= set(e) and "confirmed_ts" in e["pivot"]
+
+
+def test_every_event_carries_actual_confirmation_time_without_retro_signals():
+    from tradinglab.candles import TF_SEC
+    for name, s in list(R.load_sets().items()) + [("regime", R.synthetic("regime", seed=2))]:
+        r = run(s)
+        dt = TF_SEC[s.tf]
+        for e in r["external"] + r["internal"]:
+            assert e["known_ts"] == e["ts"] + dt                       # известно на закрытии свечи пробоя
+            assert e["pivot"]["known_ts"] == e["pivot"]["confirmed_ts"] + dt <= e["known_ts"]
+            assert e["pivot"]["ts"] <= e["pivot"]["confirmed_ts"]
+        prev = None
+        for e in r["external"]:                                        # protected-уровень CHoCH установлен прошлым событием
+            if e["type"].startswith("CHoCH"):
+                assert prev is not None and e["pivot"]["confirmed_ts"] == prev["ts"] and e["level"] == prev["protected_after"]
+            prev = e
+
+
+def test_visualisation_does_not_change_trading_decisions_or_backtest(monkeypatch):
+    """structure_v2 нигде в торговом контуре: если сломать модуль, решения и результаты backtest те же."""
+    import pathlib
+    from tradinglab import backtest, dataset
+    root = pathlib.Path(SV2.__file__).parent
+    for f in ("strategies.py", "engine.py", "risk.py", "forward.py", "backtest.py", "analysis.py", "structure.py"):
+        assert "structure_v2" not in (root / f).read_text() and "research" not in (root / f).read_text(), f
+    ds = dataset.load()
+    ref = backtest.run(ds["series"], quote=ds["quote"])
+
+    def boom(*a, **k):
+        raise AssertionError("structure_v2 вызван из торгового контура")
+    monkeypatch.setattr(SV2, "analyze_structure", boom)
+    monkeypatch.setattr(SV2, "external_structure", boom)
+    monkeypatch.setattr(SV2, "atr_swings", boom)
+    got = backtest.run(ds["series"], quote=ds["quote"])
+    for tf in ("1h", "4h", "1d"):
+        a, b = ref["traders"][tf], got["traders"][tf]
+        assert [(d["bar_ts"], d["action_final"], d["explanation"]) for d in a.decisions] == \
+               [(d["bar_ts"], d["action_final"], d["explanation"]) for d in b.decisions]
+        assert a.trades == b.trades == []
+    assert ref["valuation"]["total"] == got["valuation"]["total"]
+    acts = {tf: [d["action_final"] for d in ref["traders"][tf].decisions] for tf in ("1h", "4h", "1d")}
+    assert (acts["1h"].count("WAIT"), acts["1h"].count("WARMUP")) == (353, 20)        # зафиксированные результаты v1.0.0
+    assert (acts["4h"].count("WAIT"), acts["4h"].count("WARMUP")) == (61, 32)
+    assert acts["1d"].count("WARMUP") == 15 and len(acts["1d"]) == 15

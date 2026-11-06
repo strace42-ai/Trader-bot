@@ -134,7 +134,7 @@ def structure_payload(a, i: int) -> dict:
                "swings": [sw for sw in v2["swings"] if sw["confirmed_idx"] <= i][-30:],
                "trend": st_v2["trend"], "protected": st_v2["protected"],
                "protected_src": last_ext[-1]["protected_src"] if last_ext else None,
-               "note": "Внешняя swing-структура v2 — ИССЛЕДОВАНИЕ: стратегией S2 v1.0.0 не используется (S2 использует внутреннюю = iBOS/iCHoCH)."},
+               "note": "BOS/CHoCH — внешняя swing-структура v2, ИССЛЕДОВАНИЕ: торговыми стратегиями не используется; k — исследовательский параметр, не окончательный. iBOS/iCHoCH — внутренняя структура v1, именно её использует S2 v1.0.0."},
     }
 
 

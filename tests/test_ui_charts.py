@@ -194,7 +194,9 @@ def test_internal_structure_toggle_and_tooltip(struct_ui):
     assert any(m[1].startswith("iBOS") or m[1].startswith("iCHoCH") for m in on["markers"])
     t = struct_ui["tip"]
     assert t["shown"] == "block"
-    for s in ("Пробой", "Пробитый уровень", "Подтверждение", "Предыдущая структура"):
+    for s in ("Пробой", "Сигнал известен", "Пробитый уровень", "Подтверждение", "Предыдущая структура"):
         assert s in t["text"], s
     assert struct_ui["ev"]["type"].split("_")[0].lstrip("i") in t["text"]
+    assert ("внешняя swing-структура v2" in t["text"].lower()) or ("внутренняя структура v1" in t["text"].lower())
+    assert any("внешняя swing v2" in x for x in struct_ui["toggles"]) and any("внутренняя v1" in x for x in struct_ui["toggles"])
     assert struct_ui["table"] and struct_ui["errs"] == []

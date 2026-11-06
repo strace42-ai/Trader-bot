@@ -36,6 +36,7 @@ const { chromium } = require("playwright");
   await p.click('#t-1h .tab[data-tab="struct"], #t-1h [data-tab="struct"]').catch(() => {});
   await p.waitForTimeout(300);
   const table = await p.evaluate(() => (document.querySelector('#t-1h [data-body="struct"]') || document.querySelector("#t-1h")).textContent.includes("События структуры"));
-  console.log(JSON.stringify({ res, ev, tip, table, errs }));
+  const toggles = await p.evaluate(() => [...document.querySelectorAll("#t-1h [data-ov]")].map((x) => x.parentElement.textContent));
+  console.log(JSON.stringify({ res, ev, tip, table, toggles, errs }));
   await b.close();
 })().catch((e) => { console.log(JSON.stringify({ fatal: String(e) })); process.exit(1); });

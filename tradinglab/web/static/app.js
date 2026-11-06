@@ -30,7 +30,7 @@
         <div class="chart-col">
           <div class="chart-tools" data-f="tools">
             ${[["ema", "EMA", "--s1"], ["bb", "Bollinger", "--text-muted"], ["vol", "Объём", "--text-muted"], ["levels", "Уровни S/R", "--text-secondary"],
-               ["fib", "Fibonacci", "--s4"], ["struct", "Swing BOS/CHoCH", "--s-violet"], ["istruct", "iBOS/iCHoCH", "--text-muted"],
+               ["fib", "Fibonacci", "--s4"], ["struct", "BOS/CHoCH · внешняя swing v2", "--s-violet"], ["istruct", "iBOS/iCHoCH · внутренняя v1 (S2)", "--text-muted"],
                ["div", "Дивергенции", "--up"], ["trades", "Сделки", "--text-primary"]]
               .map(([k, n, c]) => `<label><input type="checkbox" data-ov="${k}" ${k === "fib" || k === "istruct" ? "" : "checked"}><span class="legend-dot" style="background:var(${c})"></span>${n}</label>`).join("")}
             <label title="панель RSI(14) из аналитического ядра"><input type="checkbox" data-osc="rsi" ${rsiOn() ? "checked" : ""}><span class="legend-dot" style="background:var(--accent)"></span>RSI</label>
@@ -361,10 +361,11 @@
       "LIVE-значения — по формирующейся свече"}; стратегиями не используются. В скобках — по последней закрытой свече.</div>`;
     const v2 = (T[tf].data?.trader?.analysis?.structure || T[tf].data?.preview?.structure || {}).v2;
     const evs = v2 ? [...v2.external, ...v2.internal].filter((e) => e.ts === time) : [];
-    h += evs.map((e) => `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">${e.scope === "external" ? "Swing-структура (v2)" : "Внутренняя структура (v1 = S2)"}: ${esc(e.type)}${e.initial ? " (начальный)" : ""}</div><table>
-        <tr><td>Пробой</td><td>${fmt.dt(e.ts)} · close ${fmt.price(e.close)}</td></tr>
+    h += evs.map((e) => `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">${e.scope === "external" ? "Внешняя swing-структура v2 (исследование)" : "Внутренняя структура v1 (iBOS/iCHoCH, используется S2)"}: ${esc(e.type)}${e.initial ? " (начальный)" : ""}</div><table>
+        <tr><td>Пробой</td><td>свеча ${fmt.dt(e.ts)} · close ${fmt.price(e.close)}</td></tr>
+        <tr><td>Сигнал известен</td><td>${fmt.dt(e.known_ts)} (закрытие свечи пробоя)</td></tr>
         <tr><td>Пробитый уровень</td><td>${fmt.price(e.level)} — ${e.pivot.kind === "H" ? "swing high" : "swing low"}${e.pivot.label ? " " + esc(e.pivot.label) : ""} от ${fmt.dt(e.pivot.ts)}</td></tr>
-        <tr><td>Подтверждение pivot</td><td>${fmt.dt(e.pivot.confirmed_ts)}</td></tr>
+        <tr><td>Подтверждение pivot</td><td>${e.pivot.label === "protected" ? "protected установлен" : "свеча"} ${fmt.dt(e.pivot.confirmed_ts)} · известно ${fmt.dt(e.pivot.known_ts)}</td></tr>
         <tr><td>Предыдущая структура</td><td>${{ up: "вверх", down: "вниз", none: "не определена" }[e.prev_trend]}</td></tr>
         ${e.protected_after != null ? `<tr><td>Protected после</td><td>${fmt.price(e.protected_after)}</td></tr>` : ""}</table></div>`).join("");
     const ops = (T[tf].data?.trader?.ops || []).filter((o) => o.ts === time);
@@ -669,10 +670,10 @@
     const divs = (st.divergences || []).slice().reverse();
     const v2 = st.v2;
     const evRows = v2 ? [...v2.external, ...v2.internal].sort((x, y) => y.ts - x.ts || (x.scope === "external" ? -1 : 1)).slice(0, 40)
-      .map((e) => `<tr><td><b class="${e.type.endsWith("UP") ? "pos" : "neg"}">${esc(e.type)}</b>${e.initial ? " (нач.)" : ""}</td><td>${e.scope === "external" ? "swing" : "внутр."}</td>
-        <td>${fmt.dt(e.ts)}</td><td>${e.pivot.kind}${e.pivot.label ? " " + esc(e.pivot.label) : ""} @ ${fmt.time(e.pivot.ts)}</td><td class="n">${fmt.price(e.level)}</td>
+      .map((e) => `<tr><td><b class="${e.type.endsWith("UP") ? "pos" : "neg"}">${esc(e.type)}</b>${e.initial ? " (нач.)" : ""}</td><td>${e.scope === "external" ? "внешняя v2" : "внутренняя v1"}</td>
+        <td>${fmt.dt(e.ts)}<br><span class="muted">известно ${fmt.time(e.known_ts)}</span></td><td>${e.pivot.kind}${e.pivot.label ? " " + esc(e.pivot.label) : ""} @ ${fmt.time(e.pivot.ts)}</td><td class="n">${fmt.price(e.level)}</td>
         <td class="n">${fmt.price(e.close)}</td><td>${fmt.time(e.pivot.confirmed_ts)}</td><td>${{ up: "вверх", down: "вниз", none: "—" }[e.prev_trend]}</td></tr>`).join("") : "";
-    const v2Html = v2 ? `<div class="box" style="margin-bottom:12px"><h4>События структуры: swing (v2, ATR-zigzag k=${v2.k_atr}) и внутренняя (v1 = iBOS/iCHoCH, используется S2)</h4>
+    const v2Html = v2 ? `<div class="box" style="margin-bottom:12px"><h4>События структуры: BOS/CHoCH — внешняя swing v2 (ATR-zigzag, k=${v2.k_atr} — исследовательский параметр); iBOS/iCHoCH — внутренняя v1 (используется S2)</h4>
       <div class="sec" style="margin-bottom:6px">Внешний тренд: <b>${{ up: "вверх", down: "вниз", none: "не определён" }[v2.trend]}</b>${v2.protected != null ? ` · protected ${v2.trend === "up" ? "low" : "high"} ${fmt.price(v2.protected)}${v2.protected_src ? " (" + fmt.dt(v2.protected_src.ts) + ")" : ""}` : ""}.
         ${esc(v2.note)}</div>
       <table class="t"><tr><th>Тип</th><th>Масштаб</th><th>Пробой (close)</th><th>Пробитый pivot</th><th>Уровень</th><th>Close</th><th>Pivot подтверждён</th><th>Пред. структура</th></tr>${evRows || "<tr><td colspan=8 class='muted'>нет</td></tr>"}</table></div>` : "";

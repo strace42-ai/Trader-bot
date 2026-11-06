@@ -6,7 +6,8 @@ v1 (`structure.structure_events`, используется S2 v1.0.0) — это
 ВНЕШНЯЯ swing-структура (BOS / CHoCH):
 1. Swings — ATR-zigzag: на восходящем отрезке отслеживается максимум; он подтверждается как swing high, когда low
    откатывается от него на ≥ k·ATR(14) (ATR — на баре подтверждения). Симметрично для swing low. Порог в единицах ATR
-   масштабно-инвариантен (одинаков для 1H/4H/1D и разных активов); k задан заранее (3,0), а не подобран по графику FABLES.
+   масштабно-инвариантен (одинаков для 1H/4H/1D и разных активов). k = 3,0 — ИССЛЕДОВАТЕЛЬСКИЙ параметр (проверен на
+   синтетике с известным режимом, не подобран по графику FABLES; окончательно оптимальным не считается).
    Подтверждение известно только на баре, где откат достиг порога (confirmed_idx) — без look-ahead.
 2. Состояние: тренд up/down/none, «сильный» уровень для продолжения и protected-уровень для смены:
    - up: BOS_UP — close выше СИЛЬНОГО максимума волны (самый высокий подтверждённый swing high, сформированный после последнего события;
@@ -16,13 +17,15 @@ v1 (`structure.structure_events`, используется S2 v1.0.0) — это
    - down: симметрично (BOS_DOWN, protected high, CHoCH_UP). После CHoCH protected = экстремум прошлой волны.
    - none: первый close за последним подтверждённым swing high/low — BOS (initial) задаёт направление.
 3. Все уровни берутся из swings с confirmed_idx < i; событие на баре i использует только бары ≤ i.
+4. Время фактического появления: known_ts события = закрытие свечи пробоя; known_ts pivot = закрытие свечи, на которой он
+   подтвердился (для protected — закрытие свечи события, установившего protected). Ретроспективных меток нет.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
 from . import structure
-from .candles import Series
+from .candles import TF_SEC, Series
 
 VERSION = "structure-v2.0-research"
 K_ATR = 3.0
@@ -77,8 +80,10 @@ def atr_swings(s: Series, atr: list, k: float = K_ATR) -> list[Swing]:
 def external_structure(s: Series, swings: list[Swing]) -> dict:
     """События внешней структуры и протокол состояния (trend, protected, target) по барам."""
     h, l, c, ts = s.col("h"), s.col("l"), s.col("c"), s.ts
+    dt = TF_SEC[s.tf]
     events, state = [], []
     trend, protected, prot_src = "none", None, None
+    prot_set = 0                    # бар события, на котором установлен текущий protected
     last_ev = 0                     # бар последнего события: цели BOS — только swings, сформированные не раньше него
     k = 0                           # swings отсортированы по confirmed_idx — добавляем по мере подтверждения
     known: list[Swing] = []
@@ -115,17 +120,17 @@ def external_structure(s: Series, swings: list[Swing]) -> dict:
             # CHoCH: protected = экстремум предыдущей волны с последнего события (начало нового движения).
             start = src.idx if src is not None else last_ev
             if src is None:
-                piv = {**prot_src, "confirmed_idx": prot_src["idx"], "confirmed_ts": prot_src["ts"], "label": "protected"}
+                piv = {**prot_src, "confirmed_idx": prot_set, "confirmed_ts": ts[prot_set], "known_ts": ts[prot_set] + dt, "label": "protected"}
             else:
                 piv = {"idx": src.idx, "ts": src.ts, "price": src.price, "kind": src.kind, "confirmed_idx": src.confirmed_idx,
-                       "confirmed_ts": ts[src.confirmed_idx], "label": src.label}
+                       "confirmed_ts": ts[src.confirmed_idx], "known_ts": ts[src.confirmed_idx] + dt, "label": src.label}
             rng = range(start, i + 1)
             j = min(rng, key=lambda x: l[x]) if up else max(rng, key=lambda x: h[x])
             protected = l[j] if up else h[j]
             prot_src = {"idx": j, "ts": ts[j], "price": protected, "kind": "L" if up else "H"}
             trend = "up" if up else "down"
-            last_ev = i
-            events.append({"type": typ, "scope": "external", "idx": i, "ts": ts[i], "level": level, "close": c[i], "pivot": piv,
+            last_ev = prot_set = i
+            events.append({"type": typ, "scope": "external", "idx": i, "ts": ts[i], "known_ts": ts[i] + dt, "level": level, "close": c[i], "pivot": piv,
                            "prev_trend": prev, "initial": prev == "none", "protected_after": protected, "protected_src": prot_src})
         state.append({"trend": trend, "protected": protected})
     return {"events": events, "state": state}
@@ -134,13 +139,13 @@ def external_structure(s: Series, swings: list[Swing]) -> dict:
 def internal_events(s: Series, pivots: list) -> list[dict]:
     """v1-события (используются S2 v1.0.0) в формате v2: iBOS / iCHoCH с полными данными pivot."""
     by = {p.idx: p for p in pivots}
-    out, prev = [], "none"
+    out, prev, dt = [], "none", TF_SEC[s.tf]
     for e in structure.structure_events(s, pivots):
         p = by[e["pivot_idx"]]
-        out.append({"type": "i" + e["type"], "v1_type": e["type"], "scope": "internal", "idx": e["idx"], "ts": e["ts"], "level": e["level"],
+        out.append({"type": "i" + e["type"], "v1_type": e["type"], "scope": "internal", "idx": e["idx"], "ts": e["ts"], "known_ts": e["ts"] + dt, "level": e["level"],
                     "close": s.candles[e["idx"]].c, "prev_trend": prev,
                     "pivot": {"idx": p.idx, "ts": p.ts, "price": p.price, "kind": p.kind, "confirmed_idx": p.confirmed_idx,
-                              "confirmed_ts": s.candles[p.confirmed_idx].ts}})
+                              "confirmed_ts": s.candles[p.confirmed_idx].ts, "known_ts": s.candles[p.confirmed_idx].ts + dt}})
         prev = "up" if e["type"].endswith("UP") else "down"
     return out
 
