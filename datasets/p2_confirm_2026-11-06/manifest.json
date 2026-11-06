@@ -1,0 +1,104 @@
+{
+ "source": "Binance public market data https://data-api.binance.vision/api/v3/klines (\u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0442\u0435\u043d\u0438\u0435)",
+ "format": "[open_ts_sec, o, h, l, c, quote_volume]",
+ "purpose": "\u043a\u043e\u043d\u0442\u0440\u043e\u043b\u044c\u043d\u044b\u0439 (\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u044e\u0449\u0438\u0439) \u043f\u0440\u043e\u0433\u043e\u043d P2-4H \u043d\u0430 \u0430\u043a\u0442\u0438\u0432\u0430\u0445, \u041d\u0415 \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u043d\u044b\u0445 \u043d\u0438 \u0432 \u043e\u0434\u043d\u043e\u043c \u043f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0435\u043c \u0438\u0441\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u043d\u0438\u0438; \u043f\u0440\u0430\u0432\u0438\u043b\u0430 \u0437\u0430\u0444\u0438\u043a\u0441\u0438\u0440\u043e\u0432\u0430\u043d\u044b \u0434\u043e \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438",
+ "fetched_at": 1793950291,
+ "files": {
+  "SUIUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "SUIUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "APTUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "APTUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "ARBUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "ARBUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "OPUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "OPUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "NEARUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "NEARUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "INJUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "INJUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "TIAUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "TIAUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "SEIUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "SEIUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "JUPUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "JUPUSDT_1d.json.gz": {
+   "bars": 1010,
+   "from": "2024-01-31T00:00:00+00:00"
+  },
+  "WLDUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "WLDUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "FETUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "FETUSDT_1d.json.gz": {
+   "bars": 1099,
+   "from": "2023-11-03T00:00:00+00:00"
+  },
+  "RENDERUSDT_4h.json.gz": {
+   "bars": 4379,
+   "from": "2024-11-06T08:00:00+00:00"
+  },
+  "RENDERUSDT_1d.json.gz": {
+   "bars": 833,
+   "from": "2024-07-26T00:00:00+00:00"
+  }
+ }
+}
