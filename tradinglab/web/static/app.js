@@ -6,6 +6,8 @@
   const LW = window.LightweightCharts;
   const TFS = ["1h", "4h", "1d"];
   const TITLES = { "1h": "TRADER 1H", "4h": "TRADER 4H", "1d": "TRADER 1D" };
+  const TF_DT = { "1h": 3600, "4h": 14400, "1d": 86400 };
+  const OV_OFF = new Set(["fib", "ievents", "iswing", "legacy"]);   // слои, выключенные по умолчанию (читаемость)
   const TABS = [["overview", "Обзор"], ["ind", "Индикаторы"], ["struct", "Структура"], ["onchain", "Ончейн"], ["dec", "Решения"], ["audit", "Аудит индикаторов"], ["diag", "Диагностика"]];
   const MOBILE = () => window.matchMedia("(max-width: 640px), (hover: none)").matches;
   const OSC = ["rsi", "macd", "mfi", "cmf", "obv"];          // панели осцилляторов сверху вниз (значения — из ядра)
@@ -30,9 +32,12 @@
         <div class="chart-col">
           <div class="chart-tools" data-f="tools">
             ${[["ema", "EMA", "--s1"], ["bb", "Bollinger", "--text-muted"], ["vol", "Объём", "--text-muted"], ["levels", "Уровни S/R", "--text-secondary"],
-               ["fib", "Fibonacci", "--s4"], ["struct", "BOS/CHoCH · внешняя swing v2", "--s-violet"], ["istruct", "iBOS/iCHoCH · внутренняя v1 (S2)", "--text-muted"],
+               ["fib", "Fibonacci", "--s4"],
+               ["mswing", "Major swings v3", "--s-violet"], ["mevents", "Major BOS/CHoCH v3", "--s2"], ["prot", "Protected v3", "--down"],
+               ["ievents", "iBOS/iCHoCH v3 (internal)", "--text-muted"], ["iswing", "Локальные swing", "--text-muted"], ["phase", "Фаза и диапазон", "--s4"],
+               ["legacy", "Legacy v1/v2", "--text-muted"],
                ["div", "Дивергенции", "--up"], ["trades", "Сделки", "--text-primary"]]
-              .map(([k, n, c]) => `<label><input type="checkbox" data-ov="${k}" ${k === "fib" || k === "istruct" ? "" : "checked"}><span class="legend-dot" style="background:var(${c})"></span>${n}</label>`).join("")}
+              .map(([k, n, c]) => `<label><input type="checkbox" data-ov="${k}" ${OV_OFF.has(k) ? "" : "checked"}><span class="legend-dot" style="background:var(${c})"></span>${n}</label>`).join("")}
             <label title="панель RSI(14) из аналитического ядра"><input type="checkbox" data-osc="rsi" ${rsiOn() ? "checked" : ""}><span class="legend-dot" style="background:var(--accent)"></span>RSI</label>
             <span class="spacer"></span><span class="muted">UTC · панели: RSI · MACD · MFI · CMF · OBV</span>
           </div>
@@ -231,11 +236,25 @@
       ? { time: o.ts, position: "belowBar", color: css("--up"), shape: "arrowUp", text: "BUY" }
       : { time: o.ts, position: "aboveBar", color: css("--down"), shape: "arrowDown", text: o.reason.startsWith("цель") ? "T1" : o.reason.startsWith("стоп") ? "STOP" : "SELL" }));
     const lab = (x) => x.replace("_UP", "↑").replace("_DOWN", "↓");
-    if (st.v2) {
-      if (on("struct")) st.v2.external.forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
+    const v3 = S3(tf);
+    if (v3 && !v3.empty) {
+      if (on("mswing")) v3.major.swings.forEach((w) => marks.push({ time: w.ts, position: w.kind === "H" ? "aboveBar" : "belowBar",
+        color: w.tier === "major" ? css("--s-violet") : "#7d8590", shape: "circle", size: w.tier === "major" ? 0.7 : 0.25, text: w.label || w.kind }));
+      if (on("mevents")) v3.major.events.forEach((e) => marks.push({ time: e.ts, position: /UP|HIGH/.test(e.type) ? "aboveBar" : "belowBar",
+        color: e.type.startsWith("CHoCH") ? css("--s2") : e.type.startsWith("BOS") ? css("--s-violet") : e.type === "AMBIGUOUS" ? css("--warn") : "#9aa4af",
+        shape: e.type.startsWith("SWEEP") || e.type === "AMBIGUOUS" ? "square" : /UP/.test(e.type) ? "arrowUp" : "arrowDown", size: e.type.startsWith("SWEEP") ? 0.4 : 1,
+        text: (e.type === "AMBIGUOUS" ? "AMBIG" : S3LAB(e.type)) + (e.sweep ? " (тень)" : "") + (e.scale_conflict ? " ⚠" : "") }));
+      if (on("mevents")) v3.scale_conflicts.filter((c) => c.type === "SCALE_CONFLICT").forEach((c) => marks.push({ time: c.ts, position: "aboveBar", color: css("--warn"), shape: "square", size: 0.5, text: "SCALE_CONFLICT" }));
+      if (on("ievents")) v3.internal.events.filter((e) => !e.type.startsWith("iSWEEP")).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
+        color: "#8b949e", shape: "circle", size: 0.35, text: S3LAB(e.type) }));
+      if (on("phase")) v3.timeline.forEach((p, k) => (k === 0 || p.major !== v3.timeline[k - 1].major || p.phase !== v3.timeline[k - 1].phase) &&
+        marks.push({ time: p.ts, position: "belowBar", color: css("--s4"), shape: "square", size: 0.3, text: p.major === "UP" || p.major === "DOWN" ? `${p.major} ${p.phase}` : p.major + (p.bias ? "/" + p.bias : "") }));
+    }
+    if (st.v2 && on("legacy")) {
+      if (on("legacy")) st.v2.external.forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
         color: e.type.startsWith("CHoCH") ? css("--s2") : css("--s-violet"), shape: "circle", size: 0.8, text: lab(e.type) }));
-      if (on("istruct")) st.v2.internal.slice(-30).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
-        color: "#8b949e", shape: "circle", size: 0.4, text: lab(e.type) }));
+      st.v2.internal.slice(-30).forEach((e) => marks.push({ time: e.ts, position: e.type.endsWith("UP") ? "belowBar" : "aboveBar",
+        color: "#6e7783", shape: "circle", size: 0.3, text: "v1 " + lab(e.type) }));
     }
     liveBars(d).forEach((b) => marks.push({ time: b.time, position: "aboveBar", color: css("--text-secondary"), shape: "square", size: 0.5,
       text: b.status === "FORMING" ? "FORMING" : "закрыта · ждёт GT" }));
@@ -276,7 +295,53 @@
       ["0.382", "0.5", "0.618"].forEach((r) => pl(st.fib.retracement[r], css("--s4"), `Fib ${r}`, LW.LineStyle.Dotted));
       pl(st.fib.extension["1.618"], css("--s4"), "Ext 1.618", LW.LineStyle.Dotted);
     }
-    const v2 = st.v2;
+    const line = (pts, color, width, style, keep = true) => {
+      const xs = pts.filter((p, k) => k === 0 || p.time > pts[k - 1].time);
+      if (xs.length < 2) return null;
+      const x = t.chart.addSeries(LW.LineSeries, { color, lineWidth: width, lineStyle: style, priceLineVisible: false, lastValueVisible: false,
+        crosshairMarkerVisible: false, pointMarkersVisible: false, priceFormat: { type: "price", precision: 6, minMove: 0.000001 } }, 0);
+      x.setData(xs);
+      t.extra.push(x);
+      if (keep) t.structSegs.push(x);
+      return x;
+    };
+    const v3 = S3(tf);
+    t.v3lines = { mswing: 0, mevents: 0, prot: 0, ievents: 0, iswing: 0, phase: 0 };
+    if (v3 && !v3.empty) {
+      const lastT = d.candles.at(-1)?.time;
+      if (on("mswing") && line(v3.major.swings.map((w) => ({ time: w.ts, value: w.price })), css("--s-violet"), 1, LW.LineStyle.Solid)) t.v3lines.mswing++;
+      if (on("iswing") && line(v3.internal.swings.map((w) => ({ time: w.ts, value: w.price })), "#56606c", 1, LW.LineStyle.Dotted)) t.v3lines.iswing++;
+      if (on("mevents")) v3.major.events.forEach((e) => {
+        if (e.level == null || !e.src || e.src.ts == null || e.src.ts >= e.ts) return;
+        if (line([{ time: e.src.ts, value: e.level }, { time: e.ts, value: e.level }], e.type.startsWith("CHoCH") ? css("--s2") : e.type.startsWith("BOS") ? css("--s-violet") : "#9aa4af",
+          e.type.startsWith("CHoCH") ? 2 : 1, e.type.startsWith("SWEEP") ? LW.LineStyle.Dotted : LW.LineStyle.Solid)) t.v3lines.mevents++;
+      });
+      if (on("ievents")) v3.internal.events.filter((e) => !e.type.startsWith("iSWEEP")).forEach((e) => {
+        if (e.src && e.src.ts < e.ts && line([{ time: e.src.ts, value: e.level }, { time: e.ts, value: e.level }], "#6e7783", 1, LW.LineStyle.Dotted)) t.v3lines.ievents++;
+      });
+      if (on("prot")) {
+        const hist = v3.major.protected_history;
+        hist.forEach((p, k) => {
+          if (p.status !== "PROTECTED" && p.status !== "CANDIDATE") return;
+          const end = hist.slice(k + 1).find((q) => q.side === p.side && q.src_idx === p.src_idx && q.status !== p.status) || hist.slice(k + 1).find((q) => q.side === p.side);
+          const t1 = end ? end.set_ts - TF_DT[tf] : lastT;
+          if (line([{ time: p.src_ts, value: p.price }, { time: Math.max(p.src_ts + 1, Math.min(t1, lastT)), value: p.price }], p.side === "H" ? css("--down") : css("--up"), 1,
+            p.status === "CANDIDATE" ? LW.LineStyle.SparseDotted : LW.LineStyle.Dashed)) t.v3lines.prot++;
+        });
+        const ms = v3.major.state || {};
+        if (ms.ph != null) pl(ms.ph, css("--down"), `Protected H ${ms.ph_status === "CANDIDATE" ? "(кандидат)" : "(major)"}`, LW.LineStyle.Dashed, 2);
+        if (ms.pl != null) pl(ms.pl, css("--up"), `Protected L ${ms.pl_status === "CANDIDATE" ? "(кандидат)" : "(major)"}`, LW.LineStyle.Dashed, 2);
+        const sn = v3.senior.state || {};
+        if (sn.ph != null && sn.ph !== ms.ph) pl(sn.ph, "#a371f7", "Старший protected H", LW.LineStyle.Dotted);
+        if (sn.pl != null && sn.pl !== ms.pl) pl(sn.pl, "#a371f7", "Старший protected L", LW.LineStyle.Dotted);
+      }
+      if (on("phase")) {
+        const r = v3.range || {};
+        if (r.structural_high) { pl(r.structural_high.price, css("--s4"), "Структурный max", LW.LineStyle.Dotted); t.v3lines.phase++; }
+        if (r.structural_low) { pl(r.structural_low.price, css("--s4"), "Структурный min", LW.LineStyle.Dotted); t.v3lines.phase++; }
+      }
+    }
+    const v2 = on("legacy") ? st.v2 : null;
     if (v2) {
       const seg = (e, color, width, style) => {
         if (e.pivot.ts >= e.ts) return;
@@ -285,11 +350,7 @@
         x.setData([{ time: e.pivot.ts, value: e.level }, { time: e.ts, value: e.level }]);   // от пробитого pivot до свечи пробоя
         t.extra.push(x); t.structSegs.push(x);
       };
-      if (on("struct")) {
-        v2.external.forEach((e) => seg(e, e.type.startsWith("CHoCH") ? css("--s2") : css("--s-violet"), e.type.startsWith("CHoCH") ? 2 : 1, LW.LineStyle.Solid));
-        if (v2.protected != null) pl(v2.protected, css("--s-violet"), `Protected ${v2.trend === "up" ? "L" : v2.trend === "down" ? "H" : ""}`, LW.LineStyle.Dashed);
-      }
-      if (on("istruct")) v2.internal.slice(-30).forEach((e) => seg(e, "#6e7783", 1, LW.LineStyle.Dotted));
+      v2.external.forEach((e) => seg(e, "#7d8590", 1, LW.LineStyle.Dotted));      // legacy v2 — бледно, для сравнения
     }
     const pos = tr?.position;
     if (pos) {
@@ -359,8 +420,31 @@
     if (live && r == null && v("macd_hist") == null) h += `<div class="muted">Значения индикаторов этой свечи появятся после получения закрытой свечи GeckoTerminal.</div>`;
     else if (live) h += `<div class="muted">${status === "CLOSING" ? "Предварительные значения по котировкам — окончательные после свечи GeckoTerminal" :
       "LIVE-значения — по формирующейся свече"}; стратегиями не используются. В скобках — по последней закрытой свече.</div>`;
+    const v3 = S3(tf);
+    if (v3 && !v3.empty) {
+      const tl = v3.timeline.filter((p) => p.ts <= time).at(-1);
+      if (tl) h += `<div class="tsec"><div class="th">Структура v3 на этой свече</div><table>
+        <tr><td>Major</td><td>${esc(tl.major)}${tl.bias ? "/" + esc(tl.bias) : ""} · ${esc(tl.phase)}${tl.conflict ? ' <span class="badge crit">SCALE_CONFLICT</span>' : ""}</td></tr>
+        <tr><td>Internal</td><td>${esc(tl.internal)} · старший масштаб ${esc(tl.senior)}</td></tr></table></div>`;
+      [...v3.major.events, ...v3.internal.events].filter((e) => e.ts === time).forEach((e) => {
+        h += `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">${e.scope === "internal" ? "Internal (minor)" : "MAJOR"}: ${esc(e.type)}${e.sweep ? " — тень, close вернулся (sweep)" : ""}${e.initial ? " (начальный)" : ""}${e.confirmation ? " (подтверждение)" : ""}</div><table>
+          <tr><td>Уровень</td><td>${e.level != null ? fmt.price(e.level) : "—"}${e.src && e.src.ts ? ` · экстремум ${fmt.dt(e.src.ts)}` : ""}</td></tr>
+          <tr><td>Триггер</td><td>${e.trigger ? esc(e.trigger) + " " + fmt.price(e.trigger_price) : "—"} · close ${fmt.price(e.close)}</td></tr>
+          <tr><td>Свеча / известно</td><td>${fmt.dt(e.ts)} / ${fmt.dt(e.known_ts)}${e.break_fact_ts && e.break_fact_ts !== e.ts ? ` · первое касание ${fmt.dt(e.break_fact_ts)}` : ""}</td></tr>
+          <tr><td>Было</td><td>${esc(e.prev || "")}</td></tr>
+          <tr><td>Причина</td><td>${esc(e.why || "")}</td></tr>
+          ${e.scale_conflict ? `<tr><td>SCALE_CONFLICT</td><td>${esc(e.scale_conflict.text)}</td></tr>` : ""}
+          ${e.gap ? `<tr><td>Данные</td><td>свеча после пропуска</td></tr>` : ""}</table></div>`;
+      });
+      [...v3.major.swings, ...v3.internal.swings].filter((w) => w.ts === time).forEach((w) => {
+        h += `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">Swing ${w.scope === "major" ? (w.tier === "major" ? "MAJOR" : "major-масштаба (intermediate)") : "internal"}: ${w.kind} ${esc(w.label || "")}</div><table>
+          <tr><td>Цена</td><td>${fmt.price(w.price)}</td></tr><tr><td>Экстремум</td><td>${fmt.dt(w.ts)}</td></tr>
+          <tr><td>Подтверждён (известно)</td><td>${fmt.dt(w.confirmed_ts)}</td></tr>
+          <tr><td>Роль</td><td>${(w.roles || []).map((r) => `${esc(r.role)} · с ${fmt.dt(r.assigned_ts)}`).join("<br>") || (w.tier === "intermediate" ? "внутри major-диапазона — без major-роли" : "—")}</td></tr></table></div>`;
+      });
+    }
     const v2 = (T[tf].data?.trader?.analysis?.structure || T[tf].data?.preview?.structure || {}).v2;
-    const evs = v2 ? [...v2.external, ...v2.internal].filter((e) => e.ts === time) : [];
+    const evs = v2 && document.querySelector(`#t-${tf} [data-ov="legacy"]`)?.checked ? [...v2.external, ...v2.internal].filter((e) => e.ts === time) : [];
     h += evs.map((e) => `<div class="tsec ${pane === "price" ? "on" : ""}"><div class="th">${e.scope === "external" ? "Внешняя swing-структура v2 (исследование)" : "Внутренняя структура v1 (iBOS/iCHoCH, используется S2)"}: ${esc(e.type)}${e.initial ? " (начальный)" : ""}</div><table>
         <tr><td>Пробой</td><td>свеча ${fmt.dt(e.ts)} · close ${fmt.price(e.close)}</td></tr>
         <tr><td>Сигнал известен</td><td>${fmt.dt(e.known_ts)} (закрытие свечи пробоя)</td></tr>
@@ -609,6 +693,64 @@
       ${rj.risk_fail.length ? `<h4 style="margin-top:8px">Риск-фильтры</h4><table class="t"><tr><th>Фильтр</th><th>Раз</th><th>%</th></tr>${rows(rj.risk_fail)}</table>` : ""}</div></div>`;
   }
 
+  const S3 = (tf) => T[tf].data?.structure_v3 || null;
+  const S3LAB = (x) => x.replace("_UP", "↑").replace("_DOWN", "↓").replace("SWEEP_HIGH", "sweep↑").replace("SWEEP_LOW", "sweep↓");
+  const TREND_RU = { UP: "UP", DOWN: "DOWN", TRANSITION: "TRANSITION", RANGE: "RANGE", UNDEFINED: "UNDEFINED" };
+  function majorLabel(st, conflict) {
+    if (!st) return "UNDEFINED";
+    let x = TREND_RU[st.trend] + (st.bias ? ` (уклон ${st.bias === "up" ? "вверх" : "вниз"})` : "");
+    if (conflict) x += " · SCALE_CONFLICT";
+    return x;
+  }
+  function v3Html(tf) {
+    const v = S3(tf);
+    if (!v || v.empty) return `<div class="box" style="margin-bottom:12px"><h4>Структура v3</h4><div class="sec">нет закрытых свечей</div></div>`;
+    const m = v.major, ms = m.state || {}, it = v.internal.state, sn = v.senior.state || {};
+    const ev = (e) => e ? `${esc(e.type)} ${e.level != null ? fmt.price(e.level) : ""} · ${fmt.dt(e.ts)} (известно ${fmt.time(e.known_ts)})` : "—";
+    const roles = (w) => (w.roles || []).map((r) => `${esc(r.role)} <span class="muted">${r.assigned_ts ? fmt.dt(r.assigned_ts) : ""}</span>`).join("<br>") || "—";
+    const interp = ms.trend && ms.trend !== it && ["UP", "DOWN"].includes(ms.trend) && ["UP", "DOWN"].includes(it)
+      ? (ms.trend === "DOWN" ? "Major DOWN + Internal UP — восстановление внутри нисходящей структуры" : "Major UP + Internal DOWN — коррекция внутри восходящей структуры") : "";
+    const swRows = (xs) => xs.slice().reverse().map((w) => `<tr><td><b>${w.kind}</b> ${esc(w.label || "")}</td><td class="n">${fmt.price(w.price)}</td>
+        <td>${fmt.dt(w.ts)}</td><td>${fmt.dt(w.confirmed_ts)}</td><td>${esc(w.tier)}</td><td>${roles(w)}</td></tr>`).join("") || "<tr><td colspan=6 class='muted'>нет</td></tr>";
+    const evRows = (xs) => xs.slice().reverse().map((e) => `<tr><td><b class="${/UP|HIGH/.test(e.type) ? "pos" : /DOWN|LOW/.test(e.type) ? "neg" : ""}">${esc(e.type)}</b>
+        ${e.sweep ? ' <span class="badge warn">sweep</span>' : ""}${e.initial ? ' <span class="badge">начальный</span>' : ""}${e.confirmation ? ' <span class="badge good">подтверждение</span>' : ""}
+        ${e.scale_conflict ? ' <span class="badge crit">SCALE_CONFLICT</span>' : ""}${e.gap ? ' <span class="badge warn">после пропуска</span>' : ""}</td>
+        <td>${fmt.dt(e.ts)}<br><span class="muted">известно ${fmt.dt(e.known_ts)}</span></td><td class="n">${e.level != null ? fmt.price(e.level) : "—"}</td>
+        <td class="n">${e.trigger ? esc(e.trigger) + " " + fmt.price(e.trigger_price) : "—"}<br>close ${fmt.price(e.close)}</td>
+        <td>${e.src && e.src.ts ? fmt.dt(e.src.ts) : "—"}</td><td>${esc(e.prev || "")}</td><td class="sec">${esc(e.why || "")}${e.levels ? "<br>" + esc(JSON.stringify(e.levels)) : ""}</td></tr>`).join("") || "<tr><td colspan=7 class='muted'>нет</td></tr>";
+    const evHead = "<tr><th>Событие</th><th>Свеча / известно</th><th>Уровень</th><th>Триггер / close</th><th>Источник уровня</th><th>Было</th><th>Причина</th></tr>";
+    const prRows = m.protected_history.slice().reverse().map((p) => `<tr><td>${p.side === "H" ? "high" : "low"}</td><td class="n">${fmt.price(p.price)}</td>
+        <td>${fmt.dt(p.src_ts)}</td><td>${fmt.dt(p.set_ts)}</td><td><span class="badge ${p.status === "PROTECTED" ? "good" : p.status === "VIOLATED" ? "crit" : "warn"}">${esc(p.status)}</span></td>
+        <td class="sec">${esc(p.reason)}${p.replaced != null ? ` (заменил ${fmt.price(p.replaced)})` : ""}</td></tr>`).join("") || "<tr><td colspan=6 class='muted'>нет</td></tr>";
+    const cf = v.scale_conflict_now;
+    return `<div class="box" data-v3="panel" style="margin-bottom:12px"><h4>Структура v3 (исследование; стратегиями не используется) · k major ${v.k.major} · internal ${v.k.internal} · старший масштаб ${v.k.senior}</h4>
+      <div class="kv">
+        <span class="k">Major Trend</span><span class="v"><b>${esc(majorLabel(ms, cf))}</b></span>
+        <span class="k">Internal Trend</span><span class="v">${esc(it)}</span>
+        <span class="k">Market Phase</span><span class="v">${esc(ms.phase || "—")}</span>
+        <span class="k">Protected High</span><span class="v">${ms.ph != null ? fmt.price(ms.ph) + " · " + esc(ms.ph_status) : "—"}</span>
+        <span class="k">Protected Low</span><span class="v">${ms.pl != null ? fmt.price(ms.pl) + " · " + esc(ms.pl_status) : "—"}</span>
+        <span class="k">Старший масштаб</span><span class="v">${esc(sn.trend || "—")}${sn.ph != null ? " · protected high " + fmt.price(sn.ph) : ""}${sn.pl != null ? " · protected low " + fmt.price(sn.pl) : ""}</span>
+        <span class="k">Старший ТФ</span><span class="v">${v.htf ? esc(v.htf.text) : "нет"}</span>
+        <span class="k">Last Major BOS / CHoCH</span><span class="v">${ev(v.last_major_bos)}<br>${ev(v.last_major_choch)}</span>
+        <span class="k">Last Internal iBOS / iCHoCH</span><span class="v">${ev(v.last_internal_bos)}<br>${ev(v.last_internal_choch)}</span>
+      </div>
+      ${interp ? `<div class="sec" style="margin-top:6px">${esc(interp)}</div>` : ""}
+      ${cf ? `<div class="warnline" data-v3="conflict" style="margin-top:6px">SCALE_CONFLICT: ${esc(cf.text)}. Локальный CHoCH/BOS не считается подтверждённым разворотом внешней структуры; конфликт не разрешается автоматически.</div>` : ""}
+      <h4 style="margin-top:8px">Условия изменения основного режима</h4><ul class="plain">${(v.conditions || []).map((x) => `<li>${esc(x)}</li>`).join("") || "<li>—</li>"}</ul>
+      ${v.gaps.length ? `<div class="warnline">Пропуски свечей: ${v.gaps.length} (события на свечах после пропуска помечены)</div>` : ""}
+      ${v.insufficient_history ? `<div class="warnline">Недостаточно истории для ATR(14): структура не определяется</div>` : ""}
+      <div class="muted" style="margin-top:6px">${esc(v.note)}</div></div>
+      <div class="box" style="margin-bottom:12px"><h4>1. Major swings (ZigZag ${v.k.major}·ATR; tier: major — получил структурную роль, intermediate — внутри major-диапазона)</h4>
+        <table class="t" data-v3="t-major-swings"><tr><th>Swing</th><th>Цена</th><th>Экстремум</th><th>Подтверждён (известно)</th><th>Уровень</th><th>Роль · назначена</th></tr>${swRows(m.swings)}</table></div>
+      <div class="box" style="margin-bottom:12px"><h4>2. Internal swings (ZigZag ${v.k.internal}·ATR)</h4>
+        <table class="t" data-v3="t-internal-swings"><tr><th>Swing</th><th>Цена</th><th>Экстремум</th><th>Подтверждён (известно)</th><th>Уровень</th><th>Роль</th></tr>${swRows(v.internal.swings)}</table></div>
+      <div class="box" style="margin-bottom:12px"><h4>3. Major BOS / CHoCH / SWEEP / AMBIGUOUS</h4><table class="t" data-v3="t-major-events">${evHead}${evRows(m.events)}</table>
+        ${v.scale_conflicts.length ? `<div class="sec" style="margin-top:6px">История конфликтов масштаба: ${v.scale_conflicts.map((c) => `${esc(c.type)} ${fmt.dt(c.ts)}${c.text ? " — " + esc(c.text) : ""}`).join("; ")}</div>` : ""}</div>
+      <div class="box" style="margin-bottom:12px"><h4>4. Internal iBOS / iCHoCH</h4><table class="t" data-v3="t-internal-events">${evHead}${evRows(v.internal.events)}</table></div>
+      <div class="box" style="margin-bottom:12px"><h4>5. Protected Levels History (major)</h4><table class="t" data-v3="t-protected"><tr><th>Сторона</th><th>Уровень</th><th>Экстремум</th><th>Назначен / изменён</th><th>Статус</th><th>Причина</th></tr>${prRows}</table></div>`;
+  }
+
   function renderAnalysis(tf) {
     const d = T[tf].data, tr = d.trader, sec = document.querySelector(`#t-${tf}`);
     const body = (k) => sec.querySelector(`[data-body="${k}"]`);
@@ -617,6 +759,7 @@
         ${d.preview ? "Ниже — живой рыночный анализ последней закрытой свечи (не решение трейдера)." : "Живых свечей ещё нет — бот не запущен или не загрузил историю."}</div>`;
       TABS.forEach(([k]) => (body(k).innerHTML = msg));
       if (d.preview) body("ind").innerHTML = msg + indTable(d.preview);
+      body("struct").innerHTML = v3Html(tf) + msg;
       body("onchain").innerHTML = onchain();
       return;
     }
@@ -626,6 +769,7 @@
         (${closeInfo(tf) || "ожидание закрытия"}). Рыночные индикаторы ниже — на последней закрытой живой свече; это анализ рынка, а не решение трейдера.</div>`;
       TABS.forEach(([k]) => (body(k).innerHTML = msg));
       body("ind").innerHTML = msg + indTable(an);
+      body("struct").innerHTML = v3Html(tf) + msg;
       body("onchain").innerHTML = onchain();
       return;
     }
@@ -677,10 +821,10 @@
       <div class="sec" style="margin-bottom:6px">Внешний тренд: <b>${{ up: "вверх", down: "вниз", none: "не определён" }[v2.trend]}</b>${v2.protected != null ? ` · protected ${v2.trend === "up" ? "low" : "high"} ${fmt.price(v2.protected)}${v2.protected_src ? " (" + fmt.dt(v2.protected_src.ts) + ")" : ""}` : ""}.
         ${esc(v2.note)}</div>
       <table class="t"><tr><th>Тип</th><th>Масштаб</th><th>Пробой (close)</th><th>Пробитый pivot</th><th>Уровень</th><th>Close</th><th>Pivot подтверждён</th><th>Пред. структура</th></tr>${evRows || "<tr><td colspan=8 class='muted'>нет</td></tr>"}</table></div>` : "";
-    body("struct").innerHTML = v2Html + `<div class="grid2">
-      <div class="box"><h4>Swing-структура</h4><table class="t"><tr><th>Метка</th><th>Время</th><th>Цена</th><th>Подтверждён</th></tr>
+    body("struct").innerHTML = v3Html(tf) + `<details class="box" style="margin-bottom:12px"><summary>Legacy: v2 (внешняя swing) и v1 (iBOS/iCHoCH pivots 3/3, используется S2) — для сравнения</summary>${v2Html}</details>` + `<div class="grid2">
+      <div class="box"><h4>Legacy v1: pivots 3/3</h4><table class="t"><tr><th>Метка</th><th>Время</th><th>Цена</th><th>Подтверждён</th></tr>
         ${(st.swings || []).slice().reverse().map((x) => `<tr><td>${x.label}</td><td>${fmt.time(x.ts)}</td><td class="n">${fmt.price(x.price)}</td><td class="n">бар ${x.confirmed_idx}</td></tr>`).join("") || "<tr><td colspan=4 class='muted'>нет</td></tr>"}</table>
-        <h4 style="margin-top:10px">События структуры (BOS / CHoCH)</h4><table class="t"><tr><th>Тип</th><th>Время</th><th>Уровень</th></tr>
+        <h4 style="margin-top:10px">События legacy v1 (pivots 3/3; используется S2)</h4><table class="t"><tr><th>Тип</th><th>Время</th><th>Уровень</th></tr>
         ${(st.events || []).slice(-10).reverse().map((e) => `<tr><td>${e.type}</td><td>${fmt.time(e.ts)}</td><td class="n">${fmt.price(e.level)}</td></tr>`).join("") || "<tr><td colspan=3 class='muted'>нет</td></tr>"}</table></div>
       <div class="box"><h4>Подтверждённые дивергенции</h4><table class="t"><tr><th>Индикатор</th><th>Тип</th><th>p1 → p2 (цена)</th><th>Δ цены</th><th>Δ инд.</th><th>Подтв.</th></tr>
         ${divs.map((x) => `<tr><td>${x.indicator}${x.multiplicity > 1 ? " ×2" : ""}</td><td>${x.type}</td><td class="n">${fmt.time(x.p1.ts)} ${fmt.price(x.p1.price)} → ${fmt.time(x.p2.ts)} ${fmt.price(x.p2.price)}</td>

@@ -138,6 +138,53 @@ def structure_payload(a, i: int) -> dict:
     }
 
 
+HTF_OF = {"1h": "4h", "4h": "1d", "1d": None}
+
+
+def structure_v3_payload(s, htf_s=None) -> dict:
+    """Структура v3 (исследование и визуализация; стратегиями не используется). s — закрытые свечи ТФ,
+    htf_s — закрытые свечи старшего ТФ (контекст: при UNDEFINED подтверждения не даёт)."""
+    from .. import structure_v3 as S3
+    if s is None or not len(s):
+        return {"version": S3.VERSION, "empty": True}
+    e = S3.Engine(s.tf).run(s)
+    r = e.result()
+    st = e.states()
+    tl, prev = [], None
+    for j, x in enumerate(st):
+        key = (x["major"]["trend"], x["major"]["bias"], x["major"]["phase"], x["internal"], x["conflict"])
+        if key != prev:
+            tl.append({"ts": e.ts[j], "major": x["major"]["trend"], "bias": x["major"]["bias"], "phase": x["major"]["phase"],
+                       "internal": x["internal"], "senior": x["senior"], "conflict": x["conflict"]})
+            prev = key
+    htf = None
+    if htf_s is not None:
+        he = S3.Engine(htf_s.tf).run(htf_s) if len(htf_s) else None
+        hst = he.major.states[-1] if he and he.major.states else None
+        hdir = hst["trend"] if hst and hst["trend"] in ("UP", "DOWN") else None
+        m = r["major"]["state"] or {}
+        mdir = m.get("trend") if m.get("trend") in ("UP", "DOWN") else (m.get("bias") or "").upper() or None
+        htf = {"tf": htf_s.tf, "bars": len(htf_s), "state": hst,
+               "conflict": bool(hdir and mdir and hdir != mdir),
+               "text": ("старший ТФ не определён (UNDEFINED/TRANSITION) — подтверждения не даёт" if not hdir else
+                        f"{htf_s.tf.upper()} {hdir}" + (f", protected {'high' if hdir == 'DOWN' else 'low'} "
+                        f"{(hst['ph'] if hdir == 'DOWN' else hst['pl']):.6g}" if (hst['ph'] if hdir == 'DOWN' else hst['pl']) else "")
+                        + (f" — HTF_CONFLICT с major {s.tf.upper()} {mdir}" if mdir and hdir != mdir else ""))}
+    m = r["major"]
+    rng = {"top": m["state"]["ph"] if m["state"] and m["state"]["ph"] else None,
+           "bottom": m["state"]["pl"] if m["state"] and m["state"]["pl"] else None}
+    for kind in ("H", "L"):
+        t = e.major.target(e, kind, len(e.ts))
+        if t:
+            rng["structural_high" if kind == "H" else "structural_low"] = t
+    return {**r, "timeline": tl, "htf": htf, "range": rng,
+            "note": "Структура v3 — ИССЛЕДОВАНИЕ и визуализация: торговыми стратегиями не используется. Major: правила S1/S2 "
+                    "(вложенность в major-диапазон; protected — экстремум между пробитой major-границей и пробоем); нарушение "
+                    "protected — по тени (CHoCH ≠ подтверждение). SCALE_CONFLICT — расхождение со старшим масштабом "
+                    f"(k={e.k['senior']}·ATR), HTF_CONFLICT — со старшим ТФ; конфликты показываются, но не разрешаются. "
+                    f"k_major={e.k['major']} и k_int={e.k['internal']} — исследовательские параметры."}
+
+
 def position_payload(t, mark_mid: float | None) -> dict | None:
     p = t.position
     if not p:

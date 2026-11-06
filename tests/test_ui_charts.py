@@ -178,25 +178,26 @@ def struct_ui(tmp_path_factory):
 
 
 @pytest.mark.parametrize("tf", ["1h", "4h", "1d"])
-def test_structure_segments_go_from_broken_pivot_to_break_candle(struct_ui, tf):
-    x = struct_ui["res"][tf]["off"]                       # по умолчанию: только внешняя (swing) структура
-    want = [[[e["pts"], e["level"]], [e["ts"], e["level"]]] for e in x["ext"] if e["pts"] < e["ts"]]
-    assert x["segs"] == want
-    lab = lambda e: e["type"].replace("_UP", "↑").replace("_DOWN", "↓")   # noqa: E731
-    assert all([e["ts"], lab(e)] in x["markers"] for e in x["ext"])
-    assert not any(m[1].startswith("i") for m in x["markers"])
-    assert bool(x["prot"]) == (x["protected"] is not None)
+def test_v3_layers_match_api_and_legacy_is_off(struct_ui, tf):
+    x = struct_ui["res"][tf]
+    tog = dict(x["toggles"])
+    assert tog["mswing"] and tog["mevents"] and tog["prot"] and tog["phase"]
+    assert not tog["legacy"] and not tog["ievents"] and not tog["iswing"]          # читаемость по умолчанию
+    want = [[[e["src"], e["level"]], [e["ts"], e["level"]]] for e in x["events"] if e["level"] is not None and e["src"] is not None and e["src"] < e["ts"]]
+    assert all(seg in x["segs"] for seg in want)                                   # отрезок от источника уровня до свечи события
+    assert not any(m[1].startswith("v1 ") for m in x["markers"])                   # legacy v1/v2 не смешаны с v3
+    if x["state"] and x["state"]["ph"]:
+        assert any(t.startswith("Protected H") and abs(pr - x["state"]["ph"]) < 1e-12 for t, pr in x["plines"])
 
 
-def test_internal_structure_toggle_and_tooltip(struct_ui):
-    on, off = struct_ui["res"]["1h"]["on"], struct_ui["res"]["1h"]["off"]
-    assert len(on["segs"]) == len(off["segs"]) + sum(1 for e in on["int"] if e["pts"] < e["ts"])
-    assert any(m[1].startswith("iBOS") or m[1].startswith("iCHoCH") for m in on["markers"])
+def test_v3_layer_toggles_tooltip_and_five_tables(struct_ui):
+    off, on = struct_ui["res"]["off"], struct_ui["res"]["allon"]
+    assert off["segs"] == [] and not any(t.startswith("Protected") for t, _ in off["plines"])
+    assert on["lines"]["ievents"] > 0 and on["lines"]["iswing"] == 1 and len(on["segs"]) > len(struct_ui["res"]["1h"]["segs"])
     t = struct_ui["tip"]
     assert t["shown"] == "block"
-    for s in ("Пробой", "Сигнал известен", "Пробитый уровень", "Подтверждение", "Предыдущая структура"):
+    for s in ("MAJOR: BOS", "Уровень", "Триггер", "известно", "Причина"):
         assert s in t["text"], s
-    assert struct_ui["ev"]["type"].split("_")[0].lstrip("i") in t["text"]
-    assert ("внешняя swing-структура v2" in t["text"].lower()) or ("внутренняя структура v1" in t["text"].lower())
-    assert any("внешняя swing v2" in x for x in struct_ui["toggles"]) and any("внутренняя v1" in x for x in struct_ui["toggles"])
-    assert struct_ui["table"] and struct_ui["errs"] == []
+    tab = struct_ui["tab"]
+    assert all(tab["tables"]) and "Major Trend" in tab["panel"] and "Protected High" in tab["panel"] and "Старший ТФ" in tab["panel"]
+    assert struct_ui["errs"] == []
