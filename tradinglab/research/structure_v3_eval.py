@@ -95,3 +95,56 @@ def score(tr: list[str], truth: list[str], warm: int = 100) -> dict:
         if b == a + 1 and tr[a] in ("UP", "DOWN") and tr[b] in ("UP", "DOWN") and tr[a] != tr[b]:
             rflips += 1
     return {"acc": round(ok / max(1, n - warm), 3), "flips": flips, "false_dir": false_dir, "range_flips": rflips, "lags": lags}
+
+
+# ------------------------------------------------------------------ вложенные волны (контроль выбора масштаба)
+def nested(seed: int, n_cycles: int = 6, reversal: bool = False, tf: str = "1h", step: float = 0.015, noise: float = 0.012) -> tuple[Series, dict]:
+    """Первичный нисходящий тренд из ВТОРИЧНЫХ волн (спад к новому минимуму, восстановление r·волны, r ∈ [0,4; 0,85]),
+    каждая нога разбита на ТРЕТИЧНЫЕ подволны (контрдвижение ≤ 0,3 ноги — всегда меньше вторичного восстановления).
+    Начало как у FABLES: обвал после всплеска, отскок-LH (H1), внутренний HL, меньший LH, пробой первого минимума.
+    Истина: после пробоя первого минимума major DOWN; protected high = вершина последнего ВТОРИЧНОГО восстановления;
+    reversal=True — последнее восстановление r = 1,35 проходит эту вершину (настоящая смена характера)."""
+    rnd = random.Random(seed)
+    lp = [0.0]
+
+    def leg(to, sub=True):
+        a = lp[-1]
+        d = to - a
+        if sub and abs(d) > 0.08:
+            p1 = a + 0.6 * d
+            p2 = p1 - rnd.uniform(0.15, 0.3) * d             # третичный откат ≤ 0,3 ноги
+            lp.extend([p1, p2])
+        lp.append(to)
+    leg(-0.9, sub=False)                                   # обвал после всплеска (как свеча запуска)
+    L1 = lp[-1]
+    leg(L1 + 0.45, sub=False); H1 = lp[-1]                 # LH первичной структуры
+    leg(L1 + 0.08, sub=False)                              # внутренний HL (выше L1)
+    leg(L1 + 0.28, sub=False)                              # меньший внутренний LH (ниже H1)
+    leg(L1 - rnd.uniform(0.25, 0.4))                       # пробой L1
+    tops = [H1]
+    rev_anchor = None
+    for cyc in range(n_cycles):
+        D = lp[-1]
+        if reversal and cyc == n_cycles - 1:
+            rev_anchor = len(lp) - 1
+        r = 1.35 if (reversal and cyc == n_cycles - 1) else rnd.uniform(0.4, 0.85)
+        top = D + r * (tops[-1] - D)
+        leg(top)
+        if r >= 1:
+            leg(top - 0.4 * (top - D)); leg(top + 0.3)
+            break
+        tops.append(top)
+        leg(D - rnd.uniform(0.15, 0.3))
+    out, t, anchor_bar = [], 0, [0]
+    for a, b in zip(lp, lp[1:]):
+        n = max(2, int(abs(b - a) / step))
+        for q in range(1, n + 1):
+            c = math.exp(a + (b - a) * q / n + rnd.gauss(0, noise / 2))
+            o = out[-1].c if out else math.exp(lp[0])
+            h = max(o, c) * math.exp(abs(rnd.gauss(0, noise / 2)))
+            lo_ = min(o, c) * math.exp(-abs(rnd.gauss(0, noise / 2)))
+            out.append(Candle(t * 3600, o, h, lo_, c, 1000.0))
+            t += 1
+        anchor_bar.append(t - 1)
+    return Series(tf, out), {"L1": math.exp(L1), "H1": math.exp(H1), "tops": [math.exp(x) for x in tops], "reversal": reversal,
+                             "rev_bar": None if rev_anchor is None else anchor_bar[rev_anchor]}

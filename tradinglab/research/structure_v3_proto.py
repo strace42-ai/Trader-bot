@@ -128,7 +128,8 @@ class State:
     pending_bos: dict | None = None   # тень за структурным уровнем без закрытия — ждём принятия ценой
 
 
-def run(s: Series, swings: list[Swing], scope: str = "major", vol: list | None = None, k: float = 3.0) -> dict:
+def run(s: Series, swings: list[Swing], scope: str = "major", vol: list | None = None, k: float = 3.0, init: str = "range",
+        rho: float = 0.0, k_abs: float = 6.0) -> dict:
     """Пошаговый автомат. Для бара i используются только swings, подтверждённые на барах < i
     (подтверждение известно на закрытии бара confirmed_idx)."""
     h, l, c, ts = s.col("h"), s.col("l"), s.col("c"), s.ts
@@ -180,16 +181,16 @@ def run(s: Series, swings: list[Swing], scope: str = "major", vol: list | None =
         # кандидаты: точки ноги, после которых был откат ≥ k·vol и ещё не было ЗАКРЫТИЯ за ними; берётся самая крайняя.
         # Тень-sweep без отката не заменяет подтверждённый экстремум; пробитый закрытием уровень повторно не цель.
         best = None
-        for j in range(start + 1, i - 1):
-            if kind == "H":
-                if best is not None and h[j] <= h[best]:
-                    continue
-                if h[j] - min(l[j + 1:i]) >= k * v and max(c[j + 1:i]) <= h[j]:
-                    best = j
-            else:
-                if best is not None and l[j] >= l[best]:
-                    continue
-                if max(h[j + 1:i]) - l[j] >= k * v and min(c[j + 1:i]) >= l[j]:
+        lo_r, hi_r = float("inf"), float("-inf")          # экстремумы справа от j: low/high и close на (j, i)
+        cmax, cmin = float("-inf"), float("inf")
+        for j in range(i - 1, start, -1):                    # один проход справа налево (тот же результат, O(ноги))
+            if j < i - 1:
+                lo_r, hi_r = min(lo_r, l[j + 1]), max(hi_r, h[j + 1])
+                cmax, cmin = max(cmax, c[j + 1]), min(cmin, c[j + 1])
+                if kind == "H":
+                    if h[j] - lo_r >= k * v and cmax <= h[j] and (best is None or h[j] >= h[best]):
+                        best = j
+                elif hi_r - l[j] >= k * v and cmin >= l[j] and (best is None or l[j] <= l[best]):
                     best = j
         if best is None:
             return None
@@ -301,7 +302,18 @@ def run(s: Series, swings: list[Swing], scope: str = "major", vol: list | None =
                ("подтверждение нового направления: " if confirm else "продолжение: ") +
                f"close за подтверждённым структурным {'максимумом' if kind == 'H' else 'минимумом'}")
             side = "L" if kind == "H" else "H"
-            set_prot(i, side, new[0], new[1], f"{typ}: экстремум отката между пробитым swing и пробоем")
+            cur = st.pl if side == "L" else st.ph
+            bounce = abs(new[0] - tg.price)                       # амплитуда отката, из которого вырос пробой
+            leg = abs((cur["price"] if cur else new[0]) - tg.price)    # текущая major-волна: от protected до пробитого экстремума
+            significant = (cur is None or confirm or rho <= 0 or bounce >= rho * leg
+                           or (vol is not None and vol[i] is not None and bounce >= k_abs * vol[i]))
+            if significant:
+                set_prot(i, side, new[0], new[1], f"{typ}: экстремум отката между пробитым экстремумом и пробоем"
+                         + ("" if cur is None or confirm or rho <= 0 else f" (откат {bounce / leg:.0%} major-волны)"))
+            else:
+                events[-1]["protected_kept"] = True
+                events[-1]["why"] += (f"; protected НЕ перенесён: откат {bounce / leg:.0%} волны < {rho:.0%} и < {k_abs:g}·ATR"
+                                      " — внутренний отскок не становится major-уровнем")
             if confirm:
                 other = "H" if kind == "H" else "L"
                 clear_prot(i, other, "снят: направление подтверждено")
@@ -309,27 +321,50 @@ def run(s: Series, swings: list[Swing], scope: str = "major", vol: list | None =
             st.since, st.pending_bos = i, None
             done = True
             break
-        # ---------- 3. UNDEFINED: первое принятие ценой за последним подтверждённым swing
+        # ---------- 3. UNDEFINED: начальное направление
         if not done and st.trend == "UNDEFINED":
-            hs = [w for w in known if w.kind == "H"]
-            ls = [w for w in known if w.kind == "L"]
-            if hs and ls:
-                up = c[i] > hs[-1].price
-                dn = c[i] < ls[-1].price
-                if up != dn:
-                    w = hs[-1] if up else ls[-1]
-                    ev(i, "BOS_UP" if up else "BOS_DOWN", w.price, {"idx": w.idx, "ts": w.ts, "label": w.label},
-                       {"initial": True}, "начальное направление: первое закрытие за последним подтверждённым swing")
-                    if up:
-                        j = min(range(w.idx, i + 1), key=lambda x: l[x])
-                        set_prot(i, "L", l[j], j, "начальный BOS_UP: минимум отката")
-                    else:
-                        j = max(range(w.idx, i + 1), key=lambda x: h[x])
-                        set_prot(i, "H", h[j], j, "начальный BOS_DOWN: максимум отката")
-                    st.trend, st.since = ("UP" if up else "DOWN"), i
+            if init == "range":
+                # v3b: границы major-диапазона — структурные экстремумы ВСЕЙ истории (с откатом ≥ k·vol, без закрытия за
+                # ними). Swing внутри диапазона — внутренние; направление задаёт первое закрытие за границей диапазона.
+                tH, tL = target("H", i), target("L", i)
+                up = tH is not None and c[i] > tH.price
+                dn = tL is not None and c[i] < tL.price
+                if not up and not dn:
+                    if tL is not None and l[i] < tL.price:
+                        ev(i, "SWEEP_LOW", tL.price, {"idx": tL.idx, "ts": tL.ts, "label": tL.label}, {"violation": False},
+                           "тень за границей начального диапазона, close вернулся")
+                    if tH is not None and h[i] > tH.price:
+                        ev(i, "SWEEP_HIGH", tH.price, {"idx": tH.idx, "ts": tH.ts, "label": tH.label}, {"violation": False},
+                           "тень за границей начального диапазона, close вернулся")
+                w = (tH if up else tL) if up != dn else None
+                why = "начальное направление: первое закрытие за границей major-диапазона (структурный экстремум истории)"
+            else:
+                # v3a (этап A): последний подтверждённый swing — может оказаться внутренним (подмена масштаба)
+                hs = [w for w in known if w.kind == "H"]
+                ls = [w for w in known if w.kind == "L"]
+                up = bool(hs and ls) and c[i] > hs[-1].price
+                dn = bool(hs and ls) and c[i] < ls[-1].price
+                w = (hs[-1] if up else ls[-1]) if up != dn else None
+                why = "начальное направление: первое закрытие за последним подтверждённым swing"
+            if w is not None:
+                ev(i, "BOS_UP" if up else "BOS_DOWN", w.price, {"idx": w.idx, "ts": w.ts, "label": w.label}, {"initial": True}, why)
+                if up:
+                    j = min(range(w.idx, i + 1), key=lambda x: l[x])
+                    set_prot(i, "L", l[j], j, "начальный BOS_UP: минимум между пробитым экстремумом и пробоем")
+                else:
+                    j = max(range(w.idx, i + 1), key=lambda x: h[x])
+                    set_prot(i, "H", h[j], j, "начальный BOS_DOWN: максимум между пробитым экстремумом и пробоем")
+                st.trend, st.since = ("UP" if up else "DOWN"), i
         if st.trend == "TRANSITION" and st.trans_swings["H"] >= 2 and st.trans_swings["L"] >= 2:
             st.trend = "RANGE"
-        states.append({"trend": st.trend, "bias": st.bias, "ph": st.ph and st.ph["price"], "pl": st.pl and st.pl["price"]})
+        # фаза по структурным уровням: IMPULSE — нога ещё расширяет экстремум (нет подтверждённого отката);
+        # PULLBACK — структурный экстремум подтверждён откатом, нового BOS ещё нет
+        if st.trend in ("UP", "DOWN"):
+            tgt = target("H" if st.trend == "UP" else "L", i + 1) if i + 1 <= len(c) else None
+            ph_ = "PULLBACK" if tgt is not None else "IMPULSE"
+        else:
+            ph_ = {"RANGE": "CONSOLIDATION"}.get(st.trend, "TRANSITION")
+        states.append({"trend": st.trend, "bias": st.bias, "ph": st.ph and st.ph["price"], "pl": st.pl and st.pl["price"], "phase": ph_})
     return {"events": events, "protected_history": prot_hist, "state": states, "swings": [w.d() for w in swings]}
 
 
@@ -353,12 +388,13 @@ def phase(s: Series, swings: list[Swing], state: list[dict]) -> list[str]:
     return out
 
 
-def analyze(s: Series, k_major: float = 3.0, k_int: float = 1.5, skip: int = 0, r_major: float = 0.0) -> dict:
+def analyze(s: Series, k_major: float = 3.0, k_int: float = 1.5, skip: int = 0, r_major: float = 0.0, init: str = "range",
+            rho: float = 0.0, k_abs: float | None = None) -> dict:
     vol = vol_series(s, "atr", 14, skip)
     sw_m, sw_i = zigzag(s, vol, k_major, r_major), zigzag(s, vol, k_int)
-    m, it = run(s, sw_m, "major", vol, k_major), run_internal(s, sw_i)
-    return {"major": m, "internal": it, "phase": phase(s, sw_m, m["state"]), "k_major": k_major, "k_int": k_int, "skip": skip,
-            "r_major": r_major}
+    m, it = run(s, sw_m, "major", vol, k_major, init, rho, float("inf") if k_abs is None else k_abs), run_internal(s, sw_i)
+    return {"major": m, "internal": it, "phase": [x.get("phase", "TRANSITION") for x in m["state"]], "k_major": k_major, "k_int": k_int, "skip": skip,
+            "r_major": r_major, "init": init, "rho": rho}
 
 
 def run_internal(s: Series, swings: list[Swing]) -> dict:
