@@ -19,6 +19,15 @@
   подтверждение нового направления: состояние TRANSITION; подтверждение — BOS (закрытие за структурным экстремумом
   переходной фазы). Тень за структурным экстремумом без закрытия — SWEEP (один раз на уровень). Свеча, пересекающая
   уровни с обеих сторон, — AMBIGUOUS (порядок внутри свечи неизвестен; направление не выводится).
+
+Зафиксированные ограничения (для будущего использования):
+  L1  ИСТОРИЯ. Major-диапазон инициализируется по доступной истории. Если ряд начинается не с запуска торгов
+      (history != "launch"), начальное направление помечается INCOMPLETE_HISTORY, пока его не подтвердит рынок
+      (не начальный BOS/подтверждение после старта ряда). До ATR(14) — INSUFFICIENT_HISTORY и UNDEFINED. Даже после
+      снятия пометки результат на усечённой истории может зависеть от точки старта (tests/test_structure_v3.py).
+  L2  ЖИВАЯ СВЕЧА. Нарушения protected внутри формирующейся свечи v3 НЕ обрабатывает: все события строятся по
+      закрытым свечам. Это обязательное требование, которое нужно реализовать и проверить отдельно, прежде чем
+      использовать внутрисвечные структурные сигналы в торговле.
 """
 from __future__ import annotations
 
@@ -359,8 +368,12 @@ class Internal:
 
 # ====================================================================== двигатель
 class Engine:
-    def __init__(self, tf: str, k_major: float = K_MAJOR, k_int: float = K_INT, k_senior: float = K_SENIOR):
+    def __init__(self, tf: str, k_major: float = K_MAJOR, k_int: float = K_INT, k_senior: float = K_SENIOR,
+                 history: str = "unknown"):
+        """history: "launch" — ряд начинается со свечи запуска торгов (полная история); "truncated"/"unknown" —
+        начало ряда произвольное (L1)."""
         self.tf, self.dt = tf, TF_SEC[tf]
+        self.history = history
         self.k = {"major": k_major, "internal": k_int, "senior": k_senior}
         self.ts, self.o, self.h, self.l, self.c = [], [], [], [], []
         self.vol: list[float | None] = []
@@ -466,7 +479,7 @@ class Engine:
             if isinstance(o, list):
                 return [dec(x) for x in o]
             return o
-        e = cls(st["tf"], st["k"]["major"], st["k"]["internal"], st["k"]["senior"])
+        e = cls(st["tf"], st["k"]["major"], st["k"]["internal"], st["k"]["senior"], st.get("history", "unknown"))
         for k, v in st.items():
             if k not in ("zz", "major", "senior", "internal", "version"):
                 setattr(e, k, dec(v))
@@ -489,6 +502,16 @@ class Engine:
                         "tier": "major" if r else ("intermediate" if scope == "major" else scope),
                         "roles": r["roles"] if r else []})
         return out
+
+    def history_status(self) -> str:
+        """L1: INSUFFICIENT_HISTORY — нет ATR(14); INCOMPLETE_HISTORY — ряд не с запуска и направление держится
+        только на начальном диапазоне; OK — иначе."""
+        if len(self.ts) < ATR_N:
+            return "INSUFFICIENT_HISTORY"
+        if self.history == "launch":
+            return "OK"
+        confirmed = any(x["type"].startswith(("BOS", "CHoCH")) and not x.get("initial") for x in self.major.events)
+        return "OK" if confirmed or self.major.trend == "UNDEFINED" else "INCOMPLETE_HISTORY"
 
     def result(self) -> dict:
         m = self.major
@@ -519,6 +542,8 @@ class Engine:
             "conditions": cond,
             "gaps": [{"idx": j, "ts": self.ts[j]} for j, g in enumerate(self.gap) if g], "rejected": self.rejected,
             "insufficient_history": len(self.ts) < ATR_N,
+            "history": self.history, "history_status": self.history_status(),
+            "intrabar_live": "NOT_SUPPORTED",          # L2: события только по закрытым свечам
         }
 
     def states(self) -> list[dict]:

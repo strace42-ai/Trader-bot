@@ -239,3 +239,12 @@ def test_trading_loop_does_not_use_structure_v3():
     root = ROOT / "tradinglab"
     for f in ("strategies.py", "engine.py", "risk.py", "forward.py", "backtest.py", "analysis.py", "live/worker.py"):
         assert "structure_v3" not in (root / f).read_text(), f
+
+
+def test_l1_incomplete_history_and_l2_intrabar_flag(fab):
+    r = S.Engine("1h", history="launch").run(fab).result()
+    assert r["history_status"] == "OK" and r["intrabar_live"] == "NOT_SUPPORTED"
+    late = S.Engine("1h", history="truncated").run(Series("1h", fab.candles[24:80])).result()
+    assert late["major"]["state"]["trend"] == "DOWN" and late["history_status"] == "INCOMPLETE_HISTORY"   # не выдаётся как достоверное
+    short = S.Engine("1h", history="truncated").run(Series("1h", fab.candles[:10])).result()
+    assert short["history_status"] == "INSUFFICIENT_HISTORY" and short["major"]["state"]["trend"] == "UNDEFINED"

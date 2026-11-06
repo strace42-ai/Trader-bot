@@ -725,7 +725,8 @@
     const cf = v.scale_conflict_now;
     return `<div class="box" data-v3="panel" style="margin-bottom:12px"><h4>Структура v3 (исследование; стратегиями не используется) · k major ${v.k.major} · internal ${v.k.internal} · старший масштаб ${v.k.senior}</h4>
       <div class="kv">
-        <span class="k">Major Trend</span><span class="v"><b>${esc(majorLabel(ms, cf))}</b></span>
+        <span class="k">Major Trend</span><span class="v"><b>${esc(v.history_status === "OK" ? majorLabel(ms, cf) : v.history_status + " — " + majorLabel(ms, cf) + " (не подтверждено)")}</b></span>
+        <span class="k">История</span><span class="v">${esc(v.history === "launch" ? "с запуска торгов" : "усечённая")} · ${esc(v.history_status)} · живая свеча: не обрабатывается (L2)</span>
         <span class="k">Internal Trend</span><span class="v">${esc(it)}</span>
         <span class="k">Market Phase</span><span class="v">${esc(ms.phase || "—")}</span>
         <span class="k">Protected High</span><span class="v">${ms.ph != null ? fmt.price(ms.ph) + " · " + esc(ms.ph_status) : "—"}</span>

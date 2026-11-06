@@ -141,13 +141,20 @@ def structure_payload(a, i: int) -> dict:
 HTF_OF = {"1h": "4h", "4h": "1d", "1d": None}
 
 
+FABLES_LAUNCH_TS = 1792530000          # 2026-10-20 21:00 UTC — первая свеча пула (GeckoTerminal)
+
+
+def _history(s) -> str:
+    return "launch" if s.candles and s.candles[0].ts <= FABLES_LAUNCH_TS else "truncated"
+
+
 def structure_v3_payload(s, htf_s=None) -> dict:
     """Структура v3 (исследование и визуализация; стратегиями не используется). s — закрытые свечи ТФ,
     htf_s — закрытые свечи старшего ТФ (контекст: при UNDEFINED подтверждения не даёт)."""
     from .. import structure_v3 as S3
     if s is None or not len(s):
         return {"version": S3.VERSION, "empty": True}
-    e = S3.Engine(s.tf).run(s)
+    e = S3.Engine(s.tf, history=_history(s)).run(s)
     r = e.result()
     st = e.states()
     tl, prev = [], None
@@ -159,9 +166,9 @@ def structure_v3_payload(s, htf_s=None) -> dict:
             prev = key
     htf = None
     if htf_s is not None:
-        he = S3.Engine(htf_s.tf).run(htf_s) if len(htf_s) else None
+        he = S3.Engine(htf_s.tf, history=_history(htf_s)).run(htf_s) if len(htf_s) else None
         hst = he.major.states[-1] if he and he.major.states else None
-        hdir = hst["trend"] if hst and hst["trend"] in ("UP", "DOWN") else None
+        hdir = hst["trend"] if hst and hst["trend"] in ("UP", "DOWN") and he.history_status() == "OK" else None
         m = r["major"]["state"] or {}
         mdir = m.get("trend") if m.get("trend") in ("UP", "DOWN") else (m.get("bias") or "").upper() or None
         htf = {"tf": htf_s.tf, "bars": len(htf_s), "state": hst,
@@ -182,7 +189,9 @@ def structure_v3_payload(s, htf_s=None) -> dict:
                     "(вложенность в major-диапазон; protected — экстремум между пробитой major-границей и пробоем); нарушение "
                     "protected — по тени (CHoCH ≠ подтверждение). SCALE_CONFLICT — расхождение со старшим масштабом "
                     f"(k={e.k['senior']}·ATR), HTF_CONFLICT — со старшим ТФ; конфликты показываются, но не разрешаются. "
-                    f"k_major={e.k['major']} и k_int={e.k['internal']} — исследовательские параметры."}
+                    f"k_major={e.k['major']} и k_int={e.k['internal']} — исследовательские параметры. "
+                    "Ограничения: L1 — при неполной истории направление помечается INCOMPLETE_HISTORY; L2 — нарушения "
+                    "protected внутри формирующейся свечи не обрабатываются (только закрытые свечи)."}
 
 
 def position_payload(t, mark_mid: float | None) -> dict | None:
